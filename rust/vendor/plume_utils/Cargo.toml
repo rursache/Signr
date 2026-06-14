@@ -1,0 +1,26 @@
+[package]
+name = "plume_utils"
+description = "Utility functions and types for Impactor tools."
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+idevice.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+plist.workspace = true
+tokio.workspace = true
+futures.workspace = true
+log.workspace = true
+image.workspace = true
+goblin.workspace = true
+zip.workspace = true
+flate2.workspace = true
+rayon.workspace = true
+memmap2.workspace = true
+plume_core = { path = "../plume_core", features = ["tweaks"] }
+plume_store = { path = "../plume_store" }
+decompress = { path = "../decompress" }

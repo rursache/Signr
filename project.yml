@@ -1,0 +1,89 @@
+name: Signr
+options:
+  bundleIdPrefix: ro.randusoft
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+  # Treat Icon Composer .icon packages as atomic files, not directories to walk
+  # (XcodeGen #1556) so Xcode 26 recognizes it as the app icon.
+  fileTypes:
+    icon:
+      file: true
+
+settings:
+  base:
+    # Swift 5 language mode: UniFFI 0.31 generated bindings aren't Swift-6
+    # strict-concurrency clean yet (mozilla/uniffi-rs#2448). App code is written
+    # concurrency-correctly regardless. Revisit once UniFFI ships Swift 6 bindings.
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEAD_CODE_STRIPPING: YES
+
+targets:
+  Signr:
+    type: application
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: app
+      - path: Icon.icon
+        buildPhase: resources
+      - path: rust/build/signr_core.swift
+        group: rust
+        buildPhase: sources
+    settings:
+      base:
+        PRODUCT_NAME: Signr
+        PRODUCT_BUNDLE_IDENTIFIER: ro.randusoft.signr
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSMinimumSystemVersion: "26.0"
+        INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 RanduSoft"
+        INFOPLIST_KEY_CFBundleDisplayName: Signr
+        ASSETCATALOG_COMPILER_APPICON_NAME: Icon
+        ASSETCATALOG_COMPILER_INCLUDE_ALL_APP_ICON_ASSETS: YES
+        # Non-sandboxed: usbmuxd unix socket is incompatible with App Sandbox.
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: NO
+        CODE_SIGN_ENTITLEMENTS: app/Signr.entitlements
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        # Rust staticlib needs the C++ runtime, iconv and a few system frameworks.
+        OTHER_LDFLAGS:
+          - "-lc++"
+          - "-liconv"
+          - "-framework"
+          - "Security"
+          - "-framework"
+          - "SystemConfiguration"
+    dependencies:
+      - framework: rust/build/signr_coreFFI.xcframework
+        embed: false
+        codeSign: false
+
+  SignrTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Tests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ro.randusoft.signr.tests
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: Signr
+
+schemes:
+  Signr:
+    build:
+      targets:
+        Signr: all
+        SignrTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - SignrTests

@@ -1,0 +1,30 @@
+[package]
+name = "signr_core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "signr_core"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+plume_core = { path = "../vendor/plume_core" }
+plume_utils = { path = "../vendor/plume_utils" }
+plume_store = { path = "../vendor/plume_store" }
+idevice = { git = "https://github.com/jkcoxson/idevice", rev = "5171e34e3a236842af1160a84d955d037ddca3af", default-features = false, features = ["usbmuxd", "installation_proxy", "afc", "pair", "misagent", "rsd", "ring"] }
+
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+uniffi = { version = "0.31", features = ["tokio", "cli"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+async-trait = "0.1"
+futures = "0.3"
+log = "0.4"
+thiserror = "2"
+zip = "8"
+plist = "1"

@@ -1,0 +1,18 @@
+[package]
+name = "plume_store"
+description = "Data storage layer for Plume Impactor tools."
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+rand.workspace = true
+aes-gcm = "0.10"
+plume_core = { path = "../plume_core", features = ["tweaks"] }

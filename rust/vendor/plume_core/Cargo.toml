@@ -1,0 +1,53 @@
+[package]
+name = "plume_core"
+description = "Core library for Impactor tools."
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license = "MPL-2.0"
+repository.workspace = true
+
+[dependencies]
+tokio.workspace = true
+plist.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rustls.workspace = true
+goblin.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+base64.workspace = true
+hex.workspace = true
+rand.workspace = true
+sha2.workspace = true
+# Cryptography
+aes = "0.9"
+aes-gcm = "0.11.0-rc.3"
+cbc = { version = "0.2", features = ["alloc"] }
+pbkdf2 = "0.13"
+hmac = "0.13"
+rsa = "0.9"
+# Certificates
+x509-certificate = "0.24"
+pem = "3.0"
+pem-rfc7468 = "0.7"
+rcgen = "0.12"
+sha1 = "0.10"             # p12
+p12-keystore = "0.2"      # p12 crate only supports legacy PKCS#12
+# Forks
+apple-codesign = { git = "https://github.com/PlumeImpactor/plume-apple-platform-rs", rev = "428b42f", package = "apple-codesign", default-features = false }
+native_anisette = { path = "../../native_anisette" }
+srp = "0.7.0-rc.1"
+
+# There is a bug in rustls-platform-verifier that causes an invalid certificate error with apple's root cert.
+# It has been fixed already but I am waiting for a new release before I can update the dependency.
+# Using native-tls avoids the issue.
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.13", features = ["json", "gzip", "native-tls"] }
+
+[features]
+default = []
+tweaks = []

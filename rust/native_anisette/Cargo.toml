@@ -1,0 +1,15 @@
+[package]
+name = "native_anisette"
+description = "Native macOS anisette data via AOSKit, replacing the emulated ADI path"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary"] }
+libc = "0.2"
+base64 = { workspace = true }
+thiserror = { workspace = true }

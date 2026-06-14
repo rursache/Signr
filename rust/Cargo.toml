@@ -1,0 +1,69 @@
+[workspace]
+resolver = "3"
+members = [
+    "signr_core",
+    "native_anisette",
+    "vendor/plume_core",
+    "vendor/plume_utils",
+    "vendor/plume_store",
+    "vendor/decompress",
+]
+
+# NOTE: intentionally no `panic = "abort"` here. signr_core relies on
+# std::panic::catch_unwind to turn a panicking login into an error instead of
+# aborting the whole app, which abort would break.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+[workspace.package]
+edition = "2024"
+version = "2.5.0"
+authors = ["C <claration@riseup.net>"]
+license = "MIT"
+repository = "https://github.com/claration/Impactor"
+
+# Shared deps used by the vendored PlumeImpactor crates (via `*.workspace = true`).
+[workspace.dependencies]
+tokio = { version = "1.43", features = ["rt-multi-thread"] }
+idevice = { git = "https://github.com/jkcoxson/idevice", rev = "5171e34e3a236842af1160a84d955d037ddca3af", default-features = false, features = [
+    "usbmuxd",
+    "installation_proxy",
+    "afc",
+    "pair",
+    "misagent",
+    "rsd",
+    "ring",
+] }
+plist = "1.8"
+goblin = "0.9"
+log = "0.4"
+thiserror = "2.0"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+rustls = { version = "0.23", default-features = false, features = [
+    "std",
+    "tls12",
+    "ring",
+] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+flate2 = "1.1"
+zip = "8.6"
+rayon = "1"
+memmap2 = "0.9"
+hex = "0.4"
+rand = "0.8"
+base64 = "0.22"
+sha2 = "0.11"
+regex = "1.11"
+uuid = { version = "1.3", features = ["v4", "fast-rng", "macro-diagnostics"] }
+reqwest = { version = "0.13", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls",
+    "gzip",
+] }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }

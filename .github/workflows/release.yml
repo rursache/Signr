@@ -65,6 +65,19 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
+      - name: Fetch signing toolkit
+        uses: actions/checkout@v4
+        with:
+          repository: RanduSoft/macos-signing
+          token: ${{ secrets.SIGNING_PAT }}
+          path: .signing
+
+      - name: Sign, notarize and staple
+        uses: ./.signing
+        with:
+          app-path: build/Build/Products/Release/Signr.app
+          entitlements: app/Signr.entitlements
+
       - name: Package .app into a zip
         id: pkg
         run: |

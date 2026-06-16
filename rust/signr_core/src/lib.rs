@@ -484,14 +484,39 @@ async fn device_info_from_usbmuxd(d: idevice::usbmuxd::UsbmuxdDevice) -> DeviceI
     DeviceInfo { name, udid, device_id, product_type, os_version, is_mac: false, link }
 }
 
-/// Push the current device set to Swift as a name-sorted list.
+/// Collapse the same physical device (matched by udid) appearing over both USB and WiFi into one
+/// entry, preferring the USB connection. usbmuxd hands out a separate device_id per transport, so
+/// without this a device on USB + WiFi shows up twice. Entries without a udid are left as-is.
+/// Returns a name-sorted list.
+pub fn dedup_prefer_usb(list: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
+    use std::collections::HashMap;
+    let mut by_udid: HashMap<String, DeviceInfo> = HashMap::new();
+    let mut no_udid: Vec<DeviceInfo> = Vec::new();
+    for d in list {
+        if d.udid.is_empty() {
+            no_udid.push(d);
+            continue;
+        }
+        // Keep an existing USB entry; otherwise this one wins (a USB link replaces a prior
+        // WiFi/Unknown one; same-link duplicates just overwrite harmlessly).
+        match by_udid.get(&d.udid) {
+            Some(existing) if matches!(existing.link, DeviceLink::Usb) => {}
+            _ => {
+                by_udid.insert(d.udid.clone(), d);
+            }
+        }
+    }
+    let mut out: Vec<DeviceInfo> = by_udid.into_values().chain(no_udid).collect();
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out
+}
+
+/// Push the current device set to Swift as a de-duplicated, name-sorted list.
 fn emit_devices(
     observer: &Arc<dyn DeviceObserver>,
     devices: &std::collections::HashMap<u32, DeviceInfo>,
 ) {
-    let mut list: Vec<DeviceInfo> = devices.values().cloned().collect();
-    list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    observer.on_devices(list);
+    observer.on_devices(dedup_prefer_usb(devices.values().cloned().collect()));
 }
 
 /// Sleep `secs`, returning true early if the watch was cancelled in the meantime.
@@ -1074,8 +1099,7 @@ impl SignrEngine {
         for d in raw {
             out.push(device_info_from_usbmuxd(d).await);
         }
-        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        Ok(out)
+        Ok(dedup_prefer_usb(out))
     }
 
     /// Trust / (re-)pair a device — sets up the usbmuxd pairing record so the device can

@@ -122,7 +122,7 @@ struct DestinationSection: View {
         if parts.isEmpty { parts.append(d.udid.isEmpty ? "id \(d.deviceId)" : d.udid) }
         let label = Text(parts.joined(separator: " · "))
         guard let symbol = linkSymbol(d.link) else { return label }
-        return Text(Image(systemName: symbol)) + Text(" ") + label
+        return Text(Image(systemName: symbol)) + Text(" · ") + label
     }
 
     private func linkSymbol(_ link: DeviceLink) -> String? {

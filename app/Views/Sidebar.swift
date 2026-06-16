@@ -81,8 +81,11 @@ struct DestinationSection: View {
                 ForEach(model.devices, id: \.deviceId) { d in
                     deviceRow(d)
                 }
+                if !model.devices.isEmpty {
+                    Divider().padding(.vertical, 3)
+                }
                 row(id: nil, title: "Export signed .ipa",
-                    subtitle: "save without installing", icon: "square.and.arrow.up")
+                    subtitle: Text("save without installing"), icon: "square.and.arrow.up")
             }
 
             if model.devices.isEmpty {
@@ -111,15 +114,26 @@ struct DestinationSection: View {
         }
     }
 
-    private func deviceSubtitle(_ d: DeviceInfo) -> String {
+    /// Subtitle with the USB / WiFi link symbol sitting inline before the model + iOS version
+    private func deviceSubtitle(_ d: DeviceInfo) -> Text {
         var parts: [String] = []
         if let v = d.osVersion, !v.isEmpty { parts.append("iOS \(v)") }
         if let pt = d.productType, !pt.isEmpty { parts.append(pt) }
         if parts.isEmpty { parts.append(d.udid.isEmpty ? "id \(d.deviceId)" : d.udid) }
-        return parts.joined(separator: " · ")
+        let label = Text(parts.joined(separator: " · "))
+        guard let symbol = linkSymbol(d.link) else { return label }
+        return Text(Image(systemName: symbol)) + Text(" ") + label
     }
 
-    private func row(id: String?, title: String, subtitle: String, icon: String) -> some View {
+    private func linkSymbol(_ link: DeviceLink) -> String? {
+        switch link {
+        case .usb: return "cable.connector"
+        case .wifi: return "wifi"
+        case .unknown: return nil
+        }
+    }
+
+    private func row(id: String?, title: String, subtitle: Text, icon: String) -> some View {
         let selected = model.selectedDeviceID == id
         return Button {
             model.selectedDeviceID = id
@@ -129,7 +143,7 @@ struct DestinationSection: View {
                     .foregroundStyle(selected ? Brand.tint : Color.secondary).frame(width: 20)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title).font(.callout).lineLimit(1)
-                    Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    subtitle.font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 4)
                 if selected {

@@ -157,6 +157,14 @@ pub struct IpaInfo {
     pub sdk_version: Option<String>,
 }
 
+/// How a device reached usbmuxd, so the UI can show a USB vs WiFi indicator.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum DeviceLink {
+    Usb,
+    Wifi,
+    Unknown,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct DeviceInfo {
     pub name: String,
@@ -165,6 +173,7 @@ pub struct DeviceInfo {
     pub product_type: Option<String>,
     pub os_version: Option<String>,
     pub is_mac: bool,
+    pub link: DeviceLink,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -444,6 +453,11 @@ async fn device_info_from_usbmuxd(d: idevice::usbmuxd::UsbmuxdDevice) -> DeviceI
 
     let udid = d.udid.clone();
     let device_id = d.device_id as u64;
+    let link = match d.connection_type {
+        idevice::usbmuxd::Connection::Usb => DeviceLink::Usb,
+        idevice::usbmuxd::Connection::Network(_) => DeviceLink::Wifi,
+        idevice::usbmuxd::Connection::Unknown(_) => DeviceLink::Unknown,
+    };
 
     let provider = d.to_provider(UsbmuxdAddr::default(), "signr_info");
     let (name, product_type, os_version) = match LockdownClient::connect(&provider).await {
@@ -467,7 +481,7 @@ async fn device_info_from_usbmuxd(d: idevice::usbmuxd::UsbmuxdDevice) -> DeviceI
         Err(_) => (String::new(), None, None),
     };
 
-    DeviceInfo { name, udid, device_id, product_type, os_version, is_mac: false }
+    DeviceInfo { name, udid, device_id, product_type, os_version, is_mac: false, link }
 }
 
 /// Push the current device set to Swift as a name-sorted list.

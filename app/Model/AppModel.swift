@@ -23,6 +23,7 @@ final class AppModel {
 
     // Work state (shared by sign-in and sign-and-install)
     var isWorking = false
+    var isCancelling = false
     var stage: SignStage?
     var progress: Double = 0
     var statusMessage = ""
@@ -160,8 +161,14 @@ final class AppModel {
                 self.showSignIn = false
                 self.appendLog("Signed in to \(account.teamName)", .success)
             } catch {
-                self.errorMessage = error.localizedDescription
-                self.appendLog(error.localizedDescription, .error)
+                // Cancelling the 2FA sheet throws CancellationError — treat it as a quiet stop
+                // rather than surfacing the raw "(Swift.CancellationError error 1.)" string.
+                if AppModel.isCancellation(error) {
+                    self.appendLog("Sign-in cancelled", .info)
+                } else {
+                    self.errorMessage = error.localizedDescription
+                    self.appendLog(error.localizedDescription, .error)
+                }
             }
             self.endWork()
         }
@@ -297,6 +304,14 @@ final class AppModel {
                     deviceId: deviceID,
                     observer: observer
                 )
+                // If the user hit Cancel just as the run completed, honor the cancel instead of
+                // popping a success banner, a history row, and (on export) a blocking save panel
+                // for a result they asked to abandon. Retrying just re-signs — install is idempotent.
+                if self.isCancelling {
+                    self.endWork()
+                    self.appendLog("Cancelled", .info)
+                    return
+                }
                 self.lastSigned = signed
                 self.endWork()
                 let installed = signed.outputPath == nil
@@ -312,15 +327,22 @@ final class AppModel {
                     success: true,
                     detail: installed ? "Installed to \(targetName ?? "device")" : "Exported signed IPA")
             } catch {
-                self.errorMessage = error.localizedDescription
-                self.appendLog(error.localizedDescription, .error)
+                // A user-initiated cancel is a clean stop, not a failure: don't surface a red
+                // error banner or write a history row for it, just reset and let them retry.
+                let wasCancelled = self.isCancelling || AppModel.isCancellation(error)
                 self.endWork()
-                self.recordHistory(
-                    appName: options.customName ?? fallbackName,
-                    bundleId: options.customBundleId ?? "",
-                    target: targetName ?? "Export",
-                    success: false,
-                    detail: error.localizedDescription)
+                if wasCancelled {
+                    self.appendLog("Cancelled", .info)
+                } else {
+                    self.errorMessage = error.localizedDescription
+                    self.appendLog(error.localizedDescription, .error)
+                    self.recordHistory(
+                        appName: options.customName ?? fallbackName,
+                        bundleId: options.customBundleId ?? "",
+                        target: targetName ?? "Export",
+                        success: false,
+                        detail: error.localizedDescription)
+                }
             }
         }
     }
@@ -359,8 +381,17 @@ final class AppModel {
     }
 
     func cancel() {
+        guard isWorking, !isCancelling else { return }
+        isCancelling = true
         engine.cancel()
-        appendLog("Cancellation requested", .info)
+        appendLog("Cancelling…", .info)
+    }
+
+    /// True for a cancel that came back through the FFI as `SignrError.Cancelled` or a Swift
+    /// `CancellationError`, so the completion handler can treat it as a clean stop.
+    private static func isCancellation(_ error: Error) -> Bool {
+        if let e = error as? SignrError, case .Cancelled = e { return true }
+        return error is CancellationError
     }
 
     // MARK: - 2FA
@@ -425,12 +456,20 @@ final class AppModel {
 
     private func endWork() {
         isWorking = false
+        isCancelling = false
+        stage = nil
+        progress = 0
+        statusMessage = ""
         twoFactorPrompt = false
         twoFactorRequest = nil
         twoFactorBusy = false
     }
 
     private func apply(stage: SignStage, pct: Double, message: String) {
+        // Ignore progress that lands after the user cancelled (or after the run ended): the
+        // in-flight Rust future is being torn down and a late "Uploading… 90%" line would
+        // otherwise print below "Cancelled".
+        guard isWorking, !isCancelling else { return }
         self.stage = stage
         self.progress = pct
         if !message.isEmpty {

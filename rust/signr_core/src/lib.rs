@@ -1096,9 +1096,21 @@ impl SignrEngine {
         let (done_tx, done_rx) =
             tokio::sync::oneshot::channel::<Result<SignedApp, SignrError>>();
         std::thread::spawn(move || {
-            let result = block_on_caught(run_sign_and_install(
-                data_dir, ipa_path, options, device_id, observer, token,
-            ));
+            // Race the whole pipeline against the cancel token. Without this, cancelling only
+            // flips a flag the pipeline checks between stages, so a Cancel during a long await
+            // (a stalled WiFi install, a hung Apple API call) does nothing until that await's
+            // own timeout fires. Losing the race drops the in-flight future, which closes the
+            // usbmuxd socket and tears the operation down at once. `biased` checks the token
+            // first so an already-cancelled token returns without starting work.
+            let result = block_on_caught(async move {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => Err(SignrError::Cancelled),
+                    res = run_sign_and_install(
+                        data_dir, ipa_path, options, device_id, observer, token.clone(),
+                    ) => res,
+                }
+            });
             let _ = done_tx.send(result);
         });
 

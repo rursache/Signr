@@ -358,11 +358,14 @@ struct SignScreen: View {
         HStack(spacing: 14) {
             if model.isWorking {
                 ProgressView(value: model.progress).frame(width: 180)
-                Text("\(model.stage?.title ?? "Working") · \(Int(model.progress * 100))%")
+                Text(model.isCancelling
+                     ? "Cancelling…"
+                     : "\(model.stage?.title ?? "Working") · \(Int(model.progress * 100))%")
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary).lineLimit(1)
                 Button(role: .cancel) { model.cancel() } label: {
-                    Label("Cancel", systemImage: "stop.fill")
+                    Label(model.isCancelling ? "Cancelling…" : "Cancel", systemImage: "stop.fill")
                 }
+                .disabled(model.isCancelling)
             } else {
                 destinationSummary
             }

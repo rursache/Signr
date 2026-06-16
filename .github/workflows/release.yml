@@ -43,13 +43,6 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      # Cache ~/.cargo + rust/target so releases stop recompiling idevice/rustls/Plume from
-      # scratch each run. Keyed on rust/Cargo.lock; the first run after this still pays full price.
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
-
       - name: Install XcodeGen
         run: brew install xcodegen
 

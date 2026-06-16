@@ -149,6 +149,7 @@ impl Signer {
         if let Some(custom_icon) = &self.options.custom_icon {
             let image_sizes: &[(&str, u32)] = &[
                 ("FRIcon60x60@2x.png", 120),
+                ("FRIcon60x60@3x.png", 180),
                 ("FRIcon76x76@2x~ipad.png", 152),
             ];
 

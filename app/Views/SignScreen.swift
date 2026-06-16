@@ -33,6 +33,15 @@ struct SignScreen: View {
     @State private var isDropTargeted = false
     @State private var tweakDropTargeted = false
 
+    // Custom app icon: a PNG, or a flattened .icon. `customIconURL` is the resolved PNG handed to
+    // the signer; `customIconImage` is the preview shown in place of the original icon.
+    @State private var customIconURL: URL?
+    @State private var customIconImage: NSImage?
+    @State private var showIconImporter = false
+    @State private var iconImporting = false
+    @State private var iconHovering = false
+    @State private var iconError: String?
+
     var body: some View {
         Group {
             if model.isSignedIn { content } else { signedOutState }
@@ -69,72 +78,127 @@ struct SignScreen: View {
                       allowedContentTypes: tweakTypes, allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { addTweaks(urls) }
         }
+        .fileImporter(isPresented: $showIconImporter,
+                      allowedContentTypes: iconImportTypes) { result in
+            if case .success(let url) = result { setCustomIcon(url) }
+        }
     }
 
     // MARK: IPA picker / drop zone
 
     private var ipaPicker: some View {
-        Button {
-            showIpaImporter = true
-        } label: {
-            HStack(spacing: 14) {
-                if let icon = ipaIcon {
-                    Image(nsImage: icon)
-                        .resizable().interpolation(.high)
-                        .frame(width: 46, height: 46)
-                        .clipShape(.rect(cornerRadius: 10))
-                } else {
-                    Image(systemName: ipaURL == nil ? "arrow.down.app" : "app.badge.checkmark")
-                        .font(.system(size: 26))
-                        .foregroundStyle(ipaURL == nil ? Color.secondary : Brand.tint)
-                        .frame(width: 46, height: 46)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(ipaInfo?.name ?? ipaURL?.lastPathComponent ?? "Choose an .ipa")
-                        .font(.headline).lineLimit(1)
-                    if ipaURL == nil {
-                        Text("Click to browse, or drag an IPA here")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else if let info = ipaInfo {
-                        HStack(spacing: 6) {
-                            if let v = info.version { Pill(text: "v\(v)", color: Brand.tint) }
-                            if let f = info.deviceFamily { Pill(text: f) }
-                            if let m = info.minOs { Pill(text: "iOS \(m)+") }
-                            if let sdk = info.sdkVersion { Pill(text: "SDK \(sdk)") }
-                            if let size = ipaURL?.fileSizeString { Pill(text: size) }
-                        }
-                    } else if let size = ipaURL?.fileSizeString {
-                        Text(size).font(.caption).foregroundStyle(.secondary)
+        HStack(spacing: 14) {
+            iconWell
+            VStack(alignment: .leading, spacing: 4) {
+                Text(ipaInfo?.name ?? ipaURL?.lastPathComponent ?? "Choose an .ipa")
+                    .font(.headline).lineLimit(1)
+                if ipaURL == nil {
+                    Text("Click to browse, or drag an IPA here")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if let info = ipaInfo {
+                    HStack(spacing: 6) {
+                        if let v = info.version { Pill(text: "v\(v)", color: Brand.tint) }
+                        if let f = info.deviceFamily { Pill(text: f) }
+                        if let m = info.minOs { Pill(text: "iOS \(m)+") }
+                        if let sdk = info.sdkVersion { Pill(text: "SDK \(sdk)") }
+                        if let size = ipaURL?.fileSizeString { Pill(text: size) }
                     }
+                } else if let size = ipaURL?.fileSizeString {
+                    Text(size).font(.caption).foregroundStyle(.secondary)
                 }
-                Spacer()
-                if ipaURL != nil {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(.tertiary)
-                        .onTapGesture { clearIpa() }
+                if ipaURL != nil, let iconError {
+                    Text(iconError).font(.caption2).foregroundStyle(.red).lineLimit(2)
                 }
             }
-            .padding(13)
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(isDropTargeted ? AnyShapeStyle(Brand.tint.opacity(0.12))
-                                         : AnyShapeStyle(.background.secondary))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .strokeBorder(isDropTargeted ? Brand.tint : Color(nsColor: .separatorColor),
-                                  style: StrokeStyle(lineWidth: isDropTargeted ? 1.5 : 0.5,
-                                                     dash: ipaURL == nil ? [6] : []))
-            )
+            Spacer()
+            if ipaURL != nil {
+                if customIconImage != nil {
+                    Button { clearCustomIcon() } label: {
+                        Image(systemName: "arrow.uturn.backward.circle")
+                            .font(.title3).foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Revert to the original icon")
+                }
+                Button { clearIpa() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3).foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Remove the IPA")
+            }
         }
-        .buttonStyle(.plain)
+        .padding(13)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(isDropTargeted ? AnyShapeStyle(Brand.tint.opacity(0.12))
+                                     : AnyShapeStyle(.background.secondary))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(isDropTargeted ? Brand.tint : Color(nsColor: .separatorColor),
+                              style: StrokeStyle(lineWidth: isDropTargeted ? 1.5 : 0.5,
+                                                 dash: ipaURL == nil ? [6] : []))
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 14))
+        // Only the empty card browses for an IPA. Once one is loaded the row is inert — only the
+        // icon (replace) and the X (remove) are interactive.
+        .onTapGesture { if ipaURL == nil { showIpaImporter = true } }
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first(where: { $0.pathExtension.lowercased() == "ipa" }) ?? urls.first else { return false }
             setIpa(url)
             return true
         } isTargeted: { isDropTargeted = $0 }
+    }
+
+    /// Leading 46pt icon. With an IPA loaded it's a button that picks a replacement icon (showing
+    /// the custom one once set, with a pencil/hover affordance); empty it's a static placeholder.
+    @ViewBuilder
+    private var iconWell: some View {
+        if ipaURL == nil {
+            Image(systemName: "arrow.down.app")
+                .font(.system(size: 26)).foregroundStyle(.secondary)
+                .frame(width: 46, height: 46)
+        } else {
+            Button { showIconImporter = true } label: { iconImageView }
+                .buttonStyle(.plain)
+                .disabled(iconImporting)
+                .onHover { iconHovering = $0 }
+                .help(customIconImage == nil ? "Replace the app icon" : "Custom icon — click to change")
+        }
+    }
+
+    private var iconImageView: some View {
+        ZStack {
+            Group {
+                if let img = customIconImage ?? ipaIcon {
+                    Image(nsImage: img).resizable().interpolation(.high)
+                } else {
+                    Image(systemName: "app.badge.checkmark")
+                        .font(.system(size: 26)).foregroundStyle(Brand.tint)
+                }
+            }
+            .frame(width: 46, height: 46)
+            .clipShape(.rect(cornerRadius: 10))
+
+            if iconImporting {
+                RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.45)).frame(width: 46, height: 46)
+                ProgressView().controlSize(.small)
+            } else if iconHovering {
+                RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.35)).frame(width: 46, height: 46)
+                Image(systemName: "pencil").foregroundStyle(.white).font(.system(size: 16, weight: .semibold))
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if !iconImporting {
+                Image(systemName: customIconImage == nil ? "pencil.circle.fill" : "checkmark.circle.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.white, customIconImage == nil ? Color.secondary : Brand.tint)
+                    .background(Circle().fill(Color(nsColor: .windowBackgroundColor)).padding(1))
+                    .offset(x: 4, y: 4)
+            }
+        }
     }
 
     // MARK: App options
@@ -415,8 +479,41 @@ struct SignScreen: View {
         ["dylib", "deb", "framework", "bundle", "appex"].compactMap { UTType(filenameExtension: $0) } + [.data]
     }
 
+    /// PNG plus the Icon Composer ".icon" package (by UTI, with an extension fallback in case the
+    /// type isn't registered on the machine).
+    private var iconImportTypes: [UTType] {
+        var types: [UTType] = [.png]
+        if let icon = UTType("com.apple.iconcomposer.icon") { types.append(icon) }
+        if let byExt = UTType(filenameExtension: "icon"), !types.contains(byExt) { types.append(byExt) }
+        return types
+    }
+
     private func addTweaks(_ urls: [URL]) {
         tweaks.append(contentsOf: urls.filter { !tweaks.contains($0) })
+    }
+
+    /// Resolve a picked PNG or .icon into a flat PNG (off the main actor) and show it as a preview.
+    private func setCustomIcon(_ url: URL) {
+        iconError = nil
+        iconImporting = true
+        Task { @MainActor in
+            defer { iconImporting = false }
+            do {
+                let resolved = try await Task.detached(priority: .userInitiated) {
+                    try IconImport.resolve(url)
+                }.value
+                customIconURL = resolved.png
+                customIconImage = resolved.preview
+            } catch {
+                iconError = error.localizedDescription
+            }
+        }
+    }
+
+    private func clearCustomIcon() {
+        customIconURL = nil
+        customIconImage = nil
+        iconError = nil
     }
 
     private func clearIpa() {
@@ -425,6 +522,7 @@ struct SignScreen: View {
         ipaInfo = nil
         displayName = ""
         version = ""
+        clearCustomIcon()
     }
 
     private func setIpa(_ url: URL) {
@@ -433,6 +531,7 @@ struct SignScreen: View {
         model.lastSigned = nil
         ipaInfo = nil
         ipaIcon = nil
+        clearCustomIcon()
         Task { @MainActor in
             let info = await model.ipaInfo(for: url)
             ipaInfo = info
@@ -462,6 +561,7 @@ struct SignScreen: View {
         o.customBundleId = bundleID.isEmpty ? nil : bundleID
         o.customName = displayName.isEmpty ? nil : displayName
         o.customVersion = version.isEmpty ? nil : version
+        o.customIconPath = customIconURL?.path(percentEncoded: false)
         o.tweaks = tweaks.map { $0.path(percentEncoded: false) }
         o.mainBinaryOnly = mainBinaryOnly
         o.enableEllekit = ellekit

@@ -127,7 +127,7 @@ struct DestinationSection: View {
 
     private func linkSymbol(_ link: DeviceLink) -> String? {
         switch link {
-        case .usb: return "cable.connector"
+        case .usb: return "cable.connector.horizontal"
         case .wifi: return "wifi"
         case .unknown: return nil
         }

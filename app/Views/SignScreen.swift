@@ -41,6 +41,7 @@ struct SignScreen: View {
     @State private var iconImporting = false
     @State private var iconHovering = false
     @State private var iconError: String?
+    @State private var iconDropTargeted = false
 
     var body: some View {
         Group {
@@ -132,13 +133,13 @@ struct SignScreen: View {
         .frame(maxWidth: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 14)
-                .fill(isDropTargeted ? AnyShapeStyle(Brand.tint.opacity(0.12))
-                                     : AnyShapeStyle(.background.secondary))
+                .fill(cardDropHighlighted ? AnyShapeStyle(Brand.tint.opacity(0.12))
+                                          : AnyShapeStyle(.background.secondary))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .strokeBorder(isDropTargeted ? Brand.tint : Color(nsColor: .separatorColor),
-                              style: StrokeStyle(lineWidth: isDropTargeted ? 1.5 : 0.5,
+                .strokeBorder(cardDropHighlighted ? Brand.tint : Color(nsColor: .separatorColor),
+                              style: StrokeStyle(lineWidth: cardDropHighlighted ? 1.5 : 0.5,
                                                  dash: ipaURL == nil ? [6] : []))
         )
         .contentShape(RoundedRectangle(cornerRadius: 14))
@@ -146,11 +147,16 @@ struct SignScreen: View {
         // icon (replace) and the X (remove) are interactive.
         .onTapGesture { if ipaURL == nil { showIpaImporter = true } }
         .dropDestination(for: URL.self) { urls, _ in
-            guard let url = urls.first(where: { $0.pathExtension.lowercased() == "ipa" }) ?? urls.first else { return false }
+            // Accept only an .ipa here; anything else is rejected so it can't be loaded as an app.
+            guard let url = urls.first(where: { $0.pathExtension.lowercased() == "ipa" }) else { return false }
             setIpa(url)
             return true
         } isTargeted: { isDropTargeted = $0 }
     }
+
+    /// Suppress the card's drop highlight while a drag is over the nested icon well, so the two
+    /// drop zones don't light up at once.
+    private var cardDropHighlighted: Bool { isDropTargeted && !iconDropTargeted }
 
     /// Leading 46pt icon. With an IPA loaded it's a button that picks a replacement icon (showing
     /// the custom one once set, with a pencil/hover affordance); empty it's a static placeholder.
@@ -166,6 +172,12 @@ struct SignScreen: View {
                 .disabled(iconImporting)
                 .onHover { iconHovering = $0 }
                 .help(customIconImage == nil ? "Replace the app icon" : "Custom icon — click to change")
+                .dropDestination(for: URL.self) { urls, _ in
+                    // Only the icon frame takes a replacement icon, and only PNG / .icon files.
+                    guard let url = urls.first(where: { isIconFile($0) }) else { return false }
+                    setCustomIcon(url)
+                    return true
+                } isTargeted: { iconDropTargeted = $0 }
         }
     }
 
@@ -181,13 +193,18 @@ struct SignScreen: View {
             }
             .frame(width: 46, height: 46)
             .clipShape(.rect(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Brand.tint, lineWidth: iconDropTargeted ? 2 : 0)
+            }
 
             if iconImporting {
                 RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.45)).frame(width: 46, height: 46)
                 ProgressView().controlSize(.small)
-            } else if iconHovering {
+            } else if iconHovering || iconDropTargeted {
                 RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.35)).frame(width: 46, height: 46)
-                Image(systemName: "pencil").foregroundStyle(.white).font(.system(size: 16, weight: .semibold))
+                Image(systemName: iconDropTargeted ? "square.and.arrow.down" : "pencil")
+                    .foregroundStyle(.white).font(.system(size: 16, weight: .semibold))
             }
         }
         .overlay(alignment: .bottomTrailing) {
@@ -554,6 +571,10 @@ struct SignScreen: View {
 
     private func isTweakFile(_ url: URL) -> Bool {
         ["dylib", "deb", "framework", "bundle", "appex"].contains(url.pathExtension.lowercased())
+    }
+
+    private func isIconFile(_ url: URL) -> Bool {
+        ["png", "icon"].contains(url.pathExtension.lowercased())
     }
 
     private func buildOptions() -> SignOptions {

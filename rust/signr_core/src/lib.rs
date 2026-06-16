@@ -729,11 +729,17 @@ async fn run_sign_and_install(
             async move {
                 match p {
                     InstallProgress::Uploading(pct) => {
-                        let overall = 0.85 + (pct.min(100) as f64 / 100.0) * 0.08;
+                        let overall = 0.85 + (pct.min(100) as f64 / 100.0) * 0.06;
                         obs.on_stage(SignStage::Installing, overall, format!("Uploading… {pct}%"));
                     }
+                    InstallProgress::Preparing(pct) => {
+                        // Fixed label so the console logs it once (Swift dedupes consecutive
+                        // identical lines) while the synthetic percent keeps the bar moving.
+                        let overall = 0.91 + (pct.min(100) as f64 / 100.0) * 0.05;
+                        obs.on_stage(SignStage::Installing, overall, "Installing on device…".into());
+                    }
                     InstallProgress::Installing(pct) => {
-                        let overall = 0.93 + (pct.min(100) as f64 / 100.0) * 0.06;
+                        let overall = 0.91 + (pct.min(100) as f64 / 100.0) * 0.08;
                         obs.on_stage(SignStage::Installing, overall, format!("Installing… {pct}%"));
                     }
                 }

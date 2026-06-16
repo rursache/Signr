@@ -198,20 +198,49 @@ impl Device {
             fd.close().await?;
         }
 
+        // The upload is done, but installd now verifies and copies the package on-device before
+        // it emits its first real progress event (often jumping straight to ~90%), a gap of many
+        // seconds during which it reports nothing. Surface a distinct "Installing" phase plus a
+        // slow synthetic creep so the UI doesn't look frozen on "Uploading 100%" the whole time.
+        progress(InstallProgress::Preparing(0)).await;
+
         let mut inst = InstallationProxyClient::connect(&provider).await?;
+        let real_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cb = progress.clone();
-        inst.upgrade_with_callback(
+        let cb_seen = real_seen.clone();
+        let upgrade = inst.upgrade_with_callback(
             remote_path,
             None,
             move |(p, _): (u64, ())| {
                 let cb = cb.clone();
+                cb_seen.store(true, std::sync::atomic::Ordering::Relaxed);
                 async move {
                     cb(InstallProgress::Installing(p.min(100) as u8)).await;
                 }
             },
             (),
-        )
-        .await?;
+        );
+        tokio::pin!(upgrade);
+
+        let mut creep: u8 = 0;
+        loop {
+            tokio::select! {
+                biased;
+                res = &mut upgrade => {
+                    res?;
+                    break;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(700)) => {
+                    // Ease toward a cap and stop once installd starts reporting for real, so the
+                    // creep never runs past or fights the genuine progress events.
+                    if !real_seen.load(std::sync::atomic::Ordering::Relaxed) {
+                        let step = (80u8.saturating_sub(creep) / 8).max(1);
+                        creep = (creep + step).min(80);
+                        progress(InstallProgress::Preparing(creep)).await;
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
@@ -221,6 +250,9 @@ impl Device {
 #[derive(Debug, Clone, Copy)]
 pub enum InstallProgress {
     Uploading(u8),
+    /// On-device verify/copy that runs before installd reports real progress. Carries a synthetic
+    /// 0-100 "creep" for the progress bar only; the caller renders a fixed phase label for it.
+    Preparing(u8),
     Installing(u8),
 }
 

@@ -471,10 +471,16 @@ final class AppModel {
         // otherwise print below "Cancelled".
         guard isWorking, !isCancelling else { return }
         self.stage = stage
-        self.progress = pct
+        // Clamp to non-decreasing: the install phase interleaves a synthetic "creep" with real
+        // installd events, which can land below the creep the bar already reached.
+        self.progress = max(self.progress, pct)
         if !message.isEmpty {
             statusMessage = message
-            appendLog(message, .info)
+            // Skip consecutive duplicates so the repeated "Installing on device…" creep ticks
+            // (same text, advancing percent) log a single line.
+            if log.last?.text != message {
+                appendLog(message, .info)
+            }
         }
     }
 

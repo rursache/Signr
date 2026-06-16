@@ -12,7 +12,7 @@ idevice.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 plist.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["time", "macros"] }
 futures.workspace = true
 log.workspace = true
 image.workspace = true

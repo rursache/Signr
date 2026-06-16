@@ -358,6 +358,7 @@ struct SignScreen: View {
         HStack(spacing: 14) {
             if model.isWorking {
                 ProgressView(value: model.progress).frame(width: 180)
+                    .animation(.easeOut(duration: 0.6), value: model.progress)
                 Text(model.isCancelling
                      ? "Cancelling…"
                      : "\(model.stage?.title ?? "Working") · \(Int(model.progress * 100))%")

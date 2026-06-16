@@ -17,8 +17,8 @@ settings:
     # strict-concurrency clean yet (mozilla/uniffi-rs#2448). App code is written
     # concurrency-correctly regardless. Revisit once UniFFI ships Swift 6 bindings.
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.0.2"
-    CURRENT_PROJECT_VERSION: "3"
+    MARKETING_VERSION: "1.0.3"
+    CURRENT_PROJECT_VERSION: "4"
     DEAD_CODE_STRIPPING: YES
 
 targets:

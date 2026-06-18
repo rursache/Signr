@@ -42,6 +42,12 @@ struct SignScreen: View {
     @State private var iconHovering = false
     @State private var iconError: String?
     @State private var iconDropTargeted = false
+    // The originally-picked icon file (PNG or .icon), kept so a saved session can re-resolve it.
+    @State private var customIconSourceURL: URL?
+
+    // Sessions (named, reusable sign configurations)
+    @State private var showSavePrompt = false
+    @State private var presetName = ""
 
     var body: some View {
         Group {
@@ -49,6 +55,48 @@ struct SignScreen: View {
         }
         .navigationTitle("Sign & Install")
         .toolbarTitleDisplayMode(.inline)
+        .toolbar {
+            if model.isSignedIn {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    loadMenu
+                    Button { startSavePreset() } label: {
+                        Label("Save", systemImage: "document.badge.plus")
+                    }
+                    .help("Save the current configuration as a session")
+                }
+            }
+        }
+        .alert("Save session", isPresented: $showSavePrompt) {
+            TextField("Session name", text: $presetName)
+            Button("Save") { confirmSavePreset() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Stores the IPA, icon, tweaks, names and options under a name you can reload")
+        }
+    }
+
+    /// Dropdown of saved sessions: tap one to load it, or remove via the Delete submenu.
+    private var loadMenu: some View {
+        Menu {
+            if model.presets.isEmpty {
+                Text("No saved sessions")
+            } else {
+                ForEach(model.presets) { preset in
+                    Button(preset.name) { applyPreset(preset) }
+                }
+                Divider()
+                Menu("Delete") {
+                    ForEach(model.presets) { preset in
+                        Button(preset.name, role: .destructive) { model.deletePreset(preset.id) }
+                    }
+                }
+            }
+        } label: {
+            Label("Load", systemImage: "text.document")
+        }
+        // A Menu adopts the accent color by default; match the plain Save button's label color.
+        .tint(.primary)
+        .help("Load a saved session")
     }
 
     private var content: some View {
@@ -521,6 +569,7 @@ struct SignScreen: View {
                 }.value
                 customIconURL = resolved.png
                 customIconImage = resolved.preview
+                customIconSourceURL = url
             } catch {
                 iconError = error.localizedDescription
             }
@@ -530,6 +579,7 @@ struct SignScreen: View {
     private func clearCustomIcon() {
         customIconURL = nil
         customIconImage = nil
+        customIconSourceURL = nil
         iconError = nil
     }
 
@@ -575,6 +625,106 @@ struct SignScreen: View {
 
     private func isIconFile(_ url: URL) -> Bool {
         ["png", "icon"].contains(url.pathExtension.lowercased())
+    }
+
+    // MARK: Sessions
+
+    private func startSavePreset() {
+        presetName = displayName.isEmpty
+            ? (ipaURL?.deletingPathExtension().lastPathComponent ?? "")
+            : displayName
+        showSavePrompt = true
+    }
+
+    private func confirmSavePreset() {
+        let name = presetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        model.savePreset(currentPreset(named: name))
+        model.appendLog("Saved session: \(name)", .success)
+    }
+
+    private func currentPreset(named name: String) -> SignPreset {
+        SignPreset(
+            name: name,
+            date: Date(),
+            ipaPath: ipaURL?.path(percentEncoded: false),
+            iconPath: customIconSourceURL?.path(percentEncoded: false),
+            tweakPaths: tweaks.map { $0.path(percentEncoded: false) },
+            bundleID: bundleID,
+            displayName: displayName,
+            version: version,
+            mainBinaryOnly: mainBinaryOnly,
+            ellekit: ellekit,
+            sideloadBypass: sideloadBypass,
+            wildcardAppId: wildcardAppId,
+            fileSharing: fileSharing,
+            ipadFullscreen: ipadFullscreen,
+            proMotion: proMotion,
+            gameMode: gameMode,
+            liquidGlass: liquidGlass,
+            increasedMemoryLimit: increasedMemoryLimit,
+            removeURLSchemes: removeURLSchemes,
+            removeDeviceRestrictions: removeDeviceRestrictions,
+            lowerMinOS: lowerMinOS
+        )
+    }
+
+    /// Apply a saved session to the form. Path references that no longer resolve are skipped, not
+    /// treated as errors (sessions store references, never copies).
+    private func applyPreset(_ p: SignPreset) {
+        bundleID = p.bundleID
+        displayName = p.displayName
+        version = p.version
+        mainBinaryOnly = p.mainBinaryOnly
+        ellekit = p.ellekit
+        sideloadBypass = p.sideloadBypass
+        wildcardAppId = p.wildcardAppId
+        fileSharing = p.fileSharing
+        ipadFullscreen = p.ipadFullscreen
+        proMotion = p.proMotion
+        gameMode = p.gameMode
+        liquidGlass = p.liquidGlass
+        increasedMemoryLimit = p.increasedMemoryLimit
+        removeURLSchemes = p.removeURLSchemes
+        removeDeviceRestrictions = p.removeDeviceRestrictions
+        lowerMinOS = p.lowerMinOS
+
+        let fm = FileManager.default
+        var skipped: [String] = []
+
+        let goodTweaks = p.tweakPaths.filter { fm.fileExists(atPath: $0) }
+        if goodTweaks.count != p.tweakPaths.count {
+            skipped.append("\(p.tweakPaths.count - goodTweaks.count) tweak(s)")
+        }
+        tweaks = goodTweaks.map { URL(fileURLWithPath: $0) }
+
+        // IPA. setIpa re-reads info/icon and clears any prior custom icon, so the icon is restored
+        // after it. displayName/version set above are preserved (setIpa only fills them if empty).
+        var ipaResolved = false
+        if let ipaPath = p.ipaPath, fm.fileExists(atPath: ipaPath) {
+            setIpa(URL(fileURLWithPath: ipaPath))
+            ipaResolved = true
+        } else {
+            ipaURL = nil
+            ipaInfo = nil
+            ipaIcon = nil
+            clearCustomIcon()
+            if p.ipaPath != nil { skipped.append("IPA") }
+        }
+
+        // Custom icon, re-resolved from its source path (re-flattening a .icon if needed).
+        if let iconPath = p.iconPath {
+            if !fm.fileExists(atPath: iconPath) {
+                skipped.append("icon")
+            } else if ipaResolved {
+                setCustomIcon(URL(fileURLWithPath: iconPath))
+            }
+        }
+
+        model.appendLog("Loaded session: \(p.name)", .success)
+        if !skipped.isEmpty {
+            model.appendLog("Skipped missing: \(skipped.joined(separator: ", "))", .info)
+        }
     }
 
     private func buildOptions() -> SignOptions {

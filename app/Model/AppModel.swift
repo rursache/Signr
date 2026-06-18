@@ -29,6 +29,7 @@ final class AppModel {
     var statusMessage = ""
     var log: [LogLine] = []
     var history: [HistoryEntry] = []
+    var presets: [SignPreset] = []
     var errorMessage: String?
     var lastSigned: SignedApp?
 
@@ -63,12 +64,14 @@ final class AppModel {
             teams = cachedTeams
         }
         loadHistory()
+        loadPresets()
     }
 
     // MARK: - Persistence (opaque encrypted blobs in the app data directory)
 
     private static let accountCacheFile = "device.dat"
     private static let historyFile = "recents.dat"
+    private static let presetsFile = "presets.dat"
 
     private static func dataFile(_ name: String) -> URL {
         dataDirectory().appendingPathComponent(name)
@@ -120,6 +123,40 @@ final class AppModel {
     func clearHistory() {
         history.removeAll()
         try? FileManager.default.removeItem(at: AppModel.dataFile(AppModel.historyFile))
+    }
+
+    // MARK: - Sign sessions (named, reusable sign configurations)
+
+    private func loadPresets() {
+        guard let raw = try? Data(contentsOf: AppModel.dataFile(AppModel.presetsFile)) else { return }
+        let json = DataCrypto.decrypt(raw) ?? raw
+        if let p = try? JSONDecoder().decode([SignPreset].self, from: json) {
+            presets = p.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        }
+    }
+
+    private func persistPresets() {
+        if let data = try? JSONEncoder().encode(presets) {
+            try? DataCrypto.encrypt(data).write(to: AppModel.dataFile(AppModel.presetsFile), options: .atomic)
+        }
+    }
+
+    /// Save a session, overwriting an existing one with the same name (case-insensitive).
+    func savePreset(_ preset: SignPreset) {
+        if let idx = presets.firstIndex(where: { $0.name.localizedCaseInsensitiveCompare(preset.name) == .orderedSame }) {
+            var updated = preset
+            updated.id = presets[idx].id
+            presets[idx] = updated
+        } else {
+            presets.append(preset)
+        }
+        presets.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        persistPresets()
+    }
+
+    func deletePreset(_ id: UUID) {
+        presets.removeAll { $0.id == id }
+        persistPresets()
     }
 
     static func dataDirectory() -> URL {
@@ -484,7 +521,7 @@ final class AppModel {
         }
     }
 
-    private func appendLog(_ text: String, _ kind: LogLine.Kind) {
+    func appendLog(_ text: String, _ kind: LogLine.Kind) {
         log.append(LogLine(text: text, kind: kind))
         if log.count > 500 { log.removeFirst(log.count - 500) }
     }
@@ -506,4 +543,32 @@ struct HistoryEntry: Codable, Identifiable {
     var target: String
     var success: Bool
     var detail: String
+}
+
+/// A named, reusable sign configuration. The IPA, custom icon, and tweaks are stored as path
+/// references (never copied); on load, paths that no longer resolve are skipped. The destination
+/// device is intentionally not saved, since it's transient.
+struct SignPreset: Codable, Identifiable {
+    var id = UUID()
+    var name: String
+    var date: Date
+    var ipaPath: String?
+    var iconPath: String?
+    var tweakPaths: [String]
+    var bundleID: String
+    var displayName: String
+    var version: String
+    var mainBinaryOnly: Bool
+    var ellekit: Bool
+    var sideloadBypass: Bool
+    var wildcardAppId: Bool
+    var fileSharing: Bool
+    var ipadFullscreen: Bool
+    var proMotion: Bool
+    var gameMode: Bool
+    var liquidGlass: Bool
+    var increasedMemoryLimit: Bool
+    var removeURLSchemes: Bool
+    var removeDeviceRestrictions: Bool
+    var lowerMinOS: Bool
 }

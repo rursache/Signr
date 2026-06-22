@@ -173,20 +173,25 @@ impl Package {
 
     pub fn get_archive_based_on_path(&self, path: &PathBuf) -> Result<PathBuf, Error> {
         if path.is_dir() {
-            self.clone().archive_package_bundle()
+            self.clone().archive_package_bundle(false)
         } else {
             Ok(self.package_file.clone())
         }
     }
 
-    pub fn archive_package_bundle(self) -> Result<PathBuf, Error> {
+    pub fn archive_package_bundle(self, compress: bool) -> Result<PathBuf, Error> {
         let zip_file_path = self.stage_dir.join("resigned.ipa");
         let file = fs::File::create(&zip_file_path)?;
         let mut zip = zip::ZipWriter::new(file);
-        // STORED, not Deflated: the device unzips the IPA the instant it lands, so spending CPU
-        // to compress (poorly, on already-compressed app assets) only slows the round-trip. This
-        // is what Xcode emits too.
-        let options = FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        // STORED for device installs (the device unzips the IPA the instant it lands, so compressing
+        // already-compressed app assets only slows the round-trip, matching what Xcode emits), and
+        // Deflated for exports so the saved .ipa is not ~2x the App Store original
+        let method = if compress {
+            zip::CompressionMethod::Deflated
+        } else {
+            zip::CompressionMethod::Stored
+        };
+        let options = FileOptions::default().compression_method(method);
 
         let payload_dir = self.stage_payload_dir;
 

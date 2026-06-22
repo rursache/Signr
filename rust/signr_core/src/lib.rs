@@ -745,7 +745,7 @@ async fn run_sign_and_install(
 
     if let Some(dev) = device {
         observer.on_stage(SignStage::Installing, 0.83, "Packaging app…".into());
-        let ipa = pkg.clone().archive_package_bundle().map_err(io_err)?;
+        let ipa = pkg.clone().archive_package_bundle(false).map_err(io_err)?;
 
         observer.on_stage(SignStage::Installing, 0.85, format!("Uploading to {}…", dev.name));
         let obs = observer.clone();
@@ -779,9 +779,11 @@ async fn run_sign_and_install(
         );
         Ok(SignedApp { bundle_id, display_name, output_path: None })
     } else {
-        let out = pkg
-            .get_archive_based_on_path(&PathBuf::from(&ipa_path))
-            .map_err(io_err)?;
+        observer.on_stage(SignStage::Installing, 0.83, "Packaging app…".into());
+        // Repackage the modified staged bundle like the install path does, instead of the old
+        // get_archive_based_on_path(ipa_path) which short-circuited to package_file for a file path
+        // and so exported .ipas shipped without the signing, tweak, or icon changes
+        let out = pkg.clone().archive_package_bundle(true).map_err(io_err)?;
         observer.on_stage(
             SignStage::Done,
             1.0,

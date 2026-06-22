@@ -147,17 +147,25 @@ impl Signer {
         }
 
         if let Some(custom_icon) = &self.options.custom_icon {
+            // iPad resolves the home-screen icon from the layered set in Assets.car, so the sentinel
+            // CFBundleIconName below (a name absent from the catalog) is what forces the fallback to
+            // these loose PNGs (iPhone falls back even without it, iPad does not), and iPad Pro needs
+            // the 167px slot under one of several names iPadOS versions use, so we ship them all and a
+            // device reboot is needed to refresh the icon cache
             let image_sizes: &[(&str, u32)] = &[
                 ("FRIcon60x60@2x.png", 120),
                 ("FRIcon60x60@3x.png", 180),
                 ("FRIcon76x76@2x~ipad.png", 152),
+                ("FRIcon76x76@2.17x~ipad.png", 167),
+                ("FRIcon76x76@3x~ipad.png", 228),
+                ("FRIcon83.5x83.5@2x~ipad.png", 167),
+                ("FRIcon83.5x83.5@3x~ipad.png", 250),
             ];
 
             let img = image::open(custom_icon)?;
 
             for &(file_name, size) in image_sizes {
                 let filled = img.resize_to_fill(size, size, image::imageops::FilterType::Lanczos3);
-
                 let out_path = bundle.bundle_dir().join(file_name);
                 filled.save_with_format(&out_path, image::ImageFormat::Png)?;
             }
@@ -187,6 +195,7 @@ impl Signer {
                     Value::Array(vec![
                         Value::String("FRIcon60x60".to_string()),
                         Value::String("FRIcon76x76".to_string()),
+                        Value::String("FRIcon83.5x83.5".to_string()),
                     ]),
                 );
                 primary.insert(

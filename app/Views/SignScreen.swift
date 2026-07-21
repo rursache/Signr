@@ -164,14 +164,6 @@ struct SignScreen: View {
             }
             Spacer()
             if ipaURL != nil {
-                if customIconImage != nil {
-                    Button { clearCustomIcon() } label: {
-                        Image(systemName: "arrow.uturn.backward.circle")
-                            .font(.title3).foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Revert to the original icon")
-                }
                 Button { clearIpa() } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title3).foregroundStyle(.tertiary)
@@ -223,6 +215,21 @@ struct SignScreen: View {
                 .disabled(iconImporting)
                 .onHover { iconHovering = $0 }
                 .help(customIconImage == nil ? "Replace the app icon" : "Custom icon — click to change")
+                .overlay(alignment: .bottomTrailing) {
+                    // Revert badge sits on the icon, overlaid on (not nested in) the replace button so
+                    // its own tap wins. Shown only once a custom icon is set
+                    if customIconImage != nil && !iconImporting {
+                        Button { clearCustomIcon() } label: {
+                            Image(systemName: "arrow.uturn.backward.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.white, Brand.tint)
+                                .background(Circle().fill(Color(nsColor: .windowBackgroundColor)).padding(1))
+                        }
+                        .buttonStyle(.plain)
+                        .offset(x: 4, y: 4)
+                        .help("Revert to the original icon")
+                    }
+                }
                 .dropDestination(for: URL.self) { urls, _ in
                     // Only the icon frame takes a replacement icon, and only PNG / .icon files.
                     guard let url = urls.first(where: { isIconFile($0) }) else { return false }
@@ -259,10 +266,12 @@ struct SignScreen: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            if !iconImporting {
-                Image(systemName: customIconImage == nil ? "pencil.circle.fill" : "checkmark.circle.fill")
+            // Custom icon set: the interactive revert badge lives on the iconWell button. Here we only
+            // show the static pencil hint while there's no custom icon yet
+            if !iconImporting && customIconImage == nil {
+                Image(systemName: "pencil.circle.fill")
                     .font(.system(size: 14))
-                    .foregroundStyle(.white, customIconImage == nil ? Color.secondary : Brand.tint)
+                    .foregroundStyle(.white, Color.secondary)
                     .background(Circle().fill(Color(nsColor: .windowBackgroundColor)).padding(1))
                     .offset(x: 4, y: 4)
             }

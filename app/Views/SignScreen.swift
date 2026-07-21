@@ -28,8 +28,10 @@ struct SignScreen: View {
     @State private var removeDeviceRestrictions = false
     @State private var lowerMinOS = false
 
-    @State private var showIpaImporter = false
-    @State private var showTweakImporter = false
+    // One shared file picker: stacking multiple .fileImporter modifiers on a single view is a known
+    // SwiftUI bug where only some present (Apple DTS confirmed), so we drive one importer off this enum
+    private enum ImporterKind: Equatable { case ipa, tweak, icon }
+    @State private var activeImporter: ImporterKind?
     @State private var isDropTargeted = false
     @State private var tweakDropTargeted = false
 
@@ -37,7 +39,6 @@ struct SignScreen: View {
     // the signer; `customIconImage` is the preview shown in place of the original icon.
     @State private var customIconURL: URL?
     @State private var customIconImage: NSImage?
-    @State private var showIconImporter = false
     @State private var iconImporting = false
     @State private var iconHovering = false
     @State private var iconError: String?
@@ -119,17 +120,19 @@ struct SignScreen: View {
             .frame(maxWidth: .infinity, alignment: .top)
             actionBar
         }
-        .fileImporter(isPresented: $showIpaImporter,
-                      allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .data]) { result in
-            if case .success(let url) = result { setIpa(url) }
-        }
-        .fileImporter(isPresented: $showTweakImporter,
-                      allowedContentTypes: tweakTypes, allowsMultipleSelection: true) { result in
-            if case .success(let urls) = result { addTweaks(urls) }
-        }
-        .fileImporter(isPresented: $showIconImporter,
-                      allowedContentTypes: iconImportTypes) { result in
-            if case .success(let url) = result { setCustomIcon(url) }
+        .fileImporter(
+            isPresented: Binding(get: { activeImporter != nil },
+                                 set: { if !$0 { activeImporter = nil } }),
+            allowedContentTypes: activeImporter.map(allowedImportTypes) ?? [],
+            allowsMultipleSelection: activeImporter == .tweak
+        ) { [kind = activeImporter] result in
+            guard case .success(let urls) = result else { return }
+            switch kind {
+            case .ipa: if let url = urls.first { setIpa(url) }
+            case .tweak: addTweaks(urls)
+            case .icon: if let url = urls.first { setCustomIcon(url) }
+            case nil: break
+            }
         }
     }
 
@@ -193,7 +196,7 @@ struct SignScreen: View {
         .contentShape(RoundedRectangle(cornerRadius: 14))
         // Only the empty card browses for an IPA. Once one is loaded the row is inert — only the
         // icon (replace) and the X (remove) are interactive.
-        .onTapGesture { if ipaURL == nil { showIpaImporter = true } }
+        .onTapGesture { if ipaURL == nil { activeImporter = .ipa } }
         .dropDestination(for: URL.self) { urls, _ in
             // Accept only an .ipa here; anything else is rejected so it can't be loaded as an app.
             guard let url = urls.first(where: { $0.pathExtension.lowercased() == "ipa" }) else { return false }
@@ -215,7 +218,7 @@ struct SignScreen: View {
                 .font(.system(size: 26)).foregroundStyle(.secondary)
                 .frame(width: 46, height: 46)
         } else {
-            Button { showIconImporter = true } label: { iconImageView }
+            Button { activeImporter = .icon } label: { iconImageView }
                 .buttonStyle(.plain)
                 .disabled(iconImporting)
                 .onHover { iconHovering = $0 }
@@ -347,7 +350,7 @@ struct SignScreen: View {
 
     private var tweaksCard: some View {
         Card("Tweaks & options", systemImage: "wand.and.stars", fill: true, accessory: {
-            Button { showTweakImporter = true } label: {
+            Button { activeImporter = .tweak } label: {
                 Label("Add", systemImage: "plus").font(.caption)
             }
             .buttonStyle(.borderless)
@@ -542,6 +545,14 @@ struct SignScreen: View {
 
     private var tweakTypes: [UTType] {
         ["dylib", "deb", "framework", "bundle", "appex"].compactMap { UTType(filenameExtension: $0) } + [.data]
+    }
+
+    private func allowedImportTypes(_ kind: ImporterKind) -> [UTType] {
+        switch kind {
+        case .ipa: [UTType(filenameExtension: "ipa") ?? .data]
+        case .tweak: tweakTypes
+        case .icon: iconImportTypes
+        }
     }
 
     /// PNG plus the Icon Composer ".icon" package (by UTI, with an extension fallback in case the

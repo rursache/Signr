@@ -40,6 +40,7 @@ p12-keystore = "0.2"      # p12 crate only supports legacy PKCS#12
 # Forks
 apple-codesign = { git = "https://github.com/PlumeImpactor/plume-apple-platform-rs", rev = "428b42f", package = "apple-codesign", default-features = false }
 native_anisette = { path = "../../native_anisette" }
+omnisette = { path = "../omnisette", features = ["remote-anisette-v3"] }
 srp = "0.7.0-rc.1"
 
 # There is a bug in rustls-platform-verifier that causes an invalid certificate error with apple's root cert.
@@ -51,3 +52,6 @@ reqwest = { version = "0.13", features = ["json", "gzip", "native-tls"] }
 [features]
 default = []
 tweaks = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

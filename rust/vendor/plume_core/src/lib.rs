@@ -51,6 +51,8 @@ pub enum Error {
     Reqwest(#[from] reqwest::Error),
     #[error("Anisette error: {0}")]
     Anisette(#[from] native_anisette::NativeAnisetteError),
+    #[error("Anisette provider error: {0}")]
+    AnisetteProvider(#[from] omnisette::AnisetteError),
     #[error("Serde JSON error: {0}")]
     SerdeJson(#[from] serde_json::Error),
     #[error("RSA error: {0}")]

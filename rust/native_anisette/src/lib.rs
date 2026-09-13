@@ -1,13 +1,18 @@
 //! Native macOS anisette data, sourced from the same on-device ADI that Apple's own apps use.
 //!
-//! Replaces the emulated ADI (omnisette loading Android GSA libraries). We ask AOSKit's
-//! `AOSUtilities` for the one-time-password + machine-id headers (these come from `akd` over
-//! XPC, so they are valid for THIS Mac), then fill in the device-identity headers from the
-//! machine UDID/serial and a sysctl-built client-info string. The shape matches exactly what
-//! omnisette produced, so plume_core's auth path is unchanged.
+//! This is the first tier of `plume_core`'s anisette chain. We ask AOSKit's `AOSUtilities` for
+//! the one-time-password + machine-id headers (these come from `akd` over XPC, so they are valid
+//! for THIS Mac), then fill in the device-identity headers from the machine UDID/serial and a
+//! sysctl-built client-info string. The shape matches what omnisette produces, so the tiers are
+//! interchangeable from the caller's side.
 //!
 //! Mapping follows AltServer's proven native pairing (X-Apple-I-MD-LU = base64(UTF8(udid)),
 //! device-id = raw udid, serial = machineSerialNumber).
+//!
+//! macOS 27 refuses this process access to `com.apple.ak.anisette.xpc` regardless of how the
+//! binary is signed, so `retrieveOTPHeadersForDSID:` returns an empty dictionary and we report
+//! `MissingKey`. That is expected there, and the caller falls through to the emulated-ADI and
+//! remote tiers. macOS 26 and earlier are unaffected and still take this path (RS-263).
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -69,11 +74,22 @@ unsafe fn dict_get(dict: &AnyObject, key: &str) -> Option<String> {
     v.map(|s| s.to_string())
 }
 
+// Apple's GSA edge started returning HTTP 503 for any client-info naming com.apple.dt.Xcode
+// (Sept 2026), so the agent has to identify as akd instead.
 fn client_info() -> String {
     let model = sysctl("hw.model").unwrap_or_else(|| "iMac21,1".to_string());
     let version = sysctl("kern.osproductversion").unwrap_or_else(|| "26.0".to_string());
     let build = sysctl("kern.osversion").unwrap_or_default();
-    format!("<{model}> <macOS;{version};{build}> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>")
+    format!("<{model}> <macOS;{version};{build}> <com.apple.AuthKit/1 (com.apple.akd/1.0)>")
+}
+
+/// This Mac's hardware serial, used to identify the device to a remote anisette server.
+pub fn machine_serial() -> Option<String> {
+    load_aoskit();
+    autoreleasepool(|_| unsafe {
+        let cls = AnyClass::get(c"AOSUtilities")?;
+        class_string(cls, |c| msg_send![c, machineSerialNumber])
+    })
 }
 
 /// Build the anisette base headers from this Mac's native ADI. The returned map has the exact
@@ -113,35 +129,62 @@ pub fn base_headers() -> Result<HashMap<String, String>, NativeAnisetteError> {
 mod tests {
     use super::*;
 
-    fn check(h: &HashMap<String, String>) {
-        for k in [
-            "X-Apple-I-MD",
-            "X-Apple-I-MD-M",
-            "X-Apple-I-MD-RINFO",
-            "X-Apple-I-MD-LU",
-            "X-Apple-I-SRL-NO",
-            "X-Mme-Client-Info",
-            "X-Mme-Device-Id",
-        ] {
-            assert!(h.get(k).is_some_and(|v| !v.is_empty()), "missing or empty header {k}");
+    const REQUIRED: [&str; 7] = [
+        "X-Apple-I-MD",
+        "X-Apple-I-MD-M",
+        "X-Apple-I-MD-RINFO",
+        "X-Apple-I-MD-LU",
+        "X-Apple-I-SRL-NO",
+        "X-Mme-Client-Info",
+        "X-Mme-Device-Id",
+    ];
+
+    // RS-263: Apple's GSA edge 503s any client-info naming com.apple.dt.Xcode.
+    #[test]
+    fn client_info_identifies_as_akd() {
+        let info = client_info();
+        assert!(info.contains("com.apple.akd/1.0"), "got {info}");
+        assert!(!info.contains("dt.Xcode"), "got {info}");
+    }
+
+    #[test]
+    fn client_info_has_three_angle_bracket_groups() {
+        let info = client_info();
+        assert_eq!(info.matches('<').count(), 3, "got {info}");
+        assert!(info.contains("<macOS;"), "got {info}");
+    }
+
+    /// The machine identity half of AOSKit keeps working even where the OTP half is blocked,
+    /// so this should hold on every macOS we support.
+    #[test]
+    fn machine_serial_is_available() {
+        assert!(machine_serial().is_some_and(|s| !s.is_empty()));
+    }
+
+    /// On macOS 26 and earlier akd answers and we get a full set of headers. On macOS 27 the
+    /// anisette XPC service refuses us and AOSKit hands back an empty dictionary. Both are
+    /// acceptable here; what must never happen is a partial set or a panic, because the caller
+    /// falls back to another provider on `Err` and trusts every key on `Ok`.
+    #[test]
+    fn base_headers_are_complete_or_cleanly_absent() {
+        match base_headers() {
+            Ok(h) => {
+                for k in REQUIRED {
+                    assert!(h.get(k).is_some_and(|v| !v.is_empty()), "missing header {k}");
+                }
+                assert!(h["X-Mme-Client-Info"].contains("com.apple.akd/1.0"));
+            }
+            Err(NativeAnisetteError::MissingKey(_) | NativeAnisetteError::NoOtpHeaders) => {
+                // akd declined (macOS 27); the fallback chain takes over from here.
+            }
+            Err(e) => panic!("unexpected native anisette failure: {e}"),
         }
-        println!("native anisette headers:\n{h:#?}");
     }
 
+    /// The AOSKit calls run on a tokio blocking worker in production, not the main thread.
     #[test]
-    fn fetch_on_test_thread() {
-        let h = base_headers().expect("base_headers failed on the test thread");
-        check(&h);
-    }
-
-    #[test]
-    fn fetch_on_spawned_thread() {
-        // cargo runs tests off the main thread already; this also exercises a tokio-worker-like
-        // std thread to confirm the AOSKit XPC calls do not require the main thread.
-        let h = std::thread::spawn(base_headers)
-            .join()
-            .unwrap()
-            .expect("base_headers failed on a spawned thread");
-        check(&h);
+    fn base_headers_behaves_the_same_off_the_main_thread() {
+        let spawned = std::thread::spawn(base_headers).join().unwrap();
+        assert_eq!(spawned.is_ok(), base_headers().is_ok());
     }
 }

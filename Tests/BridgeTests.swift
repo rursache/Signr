@@ -23,6 +23,33 @@ final class BridgeTests: XCTestCase {
         XCTAssertFalse(recorder.logs.isEmpty, "log lines should stream from Rust")
     }
 
+    /// RS-263: a password full of shell/regex metacharacters must cross the Swift -> Rust
+    /// boundary byte-identical, since SRP hashes the raw bytes.
+    func testSpecialCharacterStringSurvivesFFIRoundTrip() async throws {
+        let engine = SignrEngine(dataDir: NSTemporaryDirectory())
+        let recorder = Recorder()
+        let tricky = #"KaLq*^cu+*^oQJ&pUP,8C}+"#
+        let tfa = StubTwoFactor(code: tricky, recorder: recorder)
+        let progress = StubProgress(recorder: recorder)
+
+        let echoed = try await engine.selfTest(tfa: tfa, observer: progress)
+
+        XCTAssertEqual(echoed, tricky, "metacharacters must not be mangled crossing the FFI")
+        XCTAssertEqual(Array(echoed.utf8), Array(tricky.utf8), "UTF-8 bytes must match exactly")
+    }
+
+    func testUnicodePasswordSurvivesFFIRoundTrip() async throws {
+        let engine = SignrEngine(dataDir: NSTemporaryDirectory())
+        let recorder = Recorder()
+        let tricky = "pa$$\u{00e9}\u{00df}\u{4e2d}\u{6587}\u{1F511}"
+        let tfa = StubTwoFactor(code: tricky, recorder: recorder)
+        let progress = StubProgress(recorder: recorder)
+
+        let echoed = try await engine.selfTest(tfa: tfa, observer: progress)
+
+        XCTAssertEqual(Array(echoed.utf8), Array(tricky.utf8), "UTF-8 bytes must match exactly")
+    }
+
     func testSignOptionsRoundTripsThroughFFI() {
         var options = SignOptions.empty
         options.customBundleId = "ro.randusoft.demo"

@@ -205,7 +205,13 @@ impl DeveloperSession {
     pub async fn get_anisette(&self) -> AnisetteData {
         let mut locked = self.anisette.lock().await;
         if locked.needs_refresh() {
-            *locked = locked.refresh().await.unwrap();
+            // Refresh can hit the network now that anisette may come from a remote provider,
+            // so a transient failure must not panic. The current data stays valid past the
+            // refresh point, so reuse it and try again on the next call.
+            match locked.refresh().await {
+                Ok(fresh) => *locked = fresh,
+                Err(e) => log::warn!("anisette refresh failed, reusing current data: {e}"),
+            }
         }
         locked.clone()
     }

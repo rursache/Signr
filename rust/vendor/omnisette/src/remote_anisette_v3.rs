@@ -507,7 +507,10 @@ impl AnisetteHeadersProvider for RemoteAnisetteProviderV3 {
                     plist::to_file_xml(config_path, state)?;
                     client.get_headers(&state).await?
                 } else {
-                    panic!()
+                    // Upstream panics here, which surfaces as "explicit panic" and kills the
+                    // login on any transient server hiccup. Report it instead so the caller
+                    // can fall back or retry.
+                    return Err(err);
                 }
             }
         };

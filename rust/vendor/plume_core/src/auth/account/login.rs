@@ -291,3 +291,95 @@ impl Account {
         locked.clone()
     }
 }
+
+#[cfg(test)]
+mod srp_protocol_probe {
+    use super::*;
+
+    /// RS-263 follow-up: find out which key-stretching protocol Apple selects for an account.
+    ///
+    /// The SRP `init` step needs only a username, never a password, so this is safe to run with
+    /// a real Apple ID. `login_email_pass` always stretches the password the `s2k` way; if Apple
+    /// answers with `sp = s2k_fo` the proof we send is wrong and Apple reports it as error
+    /// -22406 "Enter the correct password", which is indistinguishable from a real typo.
+    ///
+    ///   SIGNR_PROBE_APPLE_ID=you@example.com \
+    ///     cargo test -p plume_core --features tweaks --lib srp_protocol_probe -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn reports_selected_srp_protocol() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let username = std::env::var("SIGNR_PROBE_APPLE_ID")
+            .expect("set SIGNR_PROBE_APPLE_ID to the Apple ID to probe");
+        let username = username.to_lowercase();
+
+        let anisette = AnisetteData::new().await.expect("no anisette tier succeeded");
+        println!("anisette source: {:?}", anisette.source);
+
+        let srp_client = srp::Client::<G2048, Sha256>::new_with_options(false);
+        let a: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+        let a_pub = srp_client.compute_public_ephemeral(&a);
+
+        let mut gsa_headers = HeaderMap::new();
+        gsa_headers.insert(
+            "Content-Type",
+            HeaderValue::from_str("text/x-xml-plist").unwrap(),
+        );
+        gsa_headers.insert("Accept", HeaderValue::from_str("*/*").unwrap());
+        gsa_headers.insert(
+            "User-Agent",
+            HeaderValue::from_str("akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0").unwrap(),
+        );
+        gsa_headers.insert(
+            "X-MMe-Client-Info",
+            HeaderValue::from_str(&anisette.get_header("x-mme-client-info").unwrap()).unwrap(),
+        );
+
+        let init_packet = InitRequest {
+            header: RequestHeader {
+                version: "1.0.1".to_string(),
+            },
+            request: InitRequestBody {
+                a_pub: plist::Value::Data(a_pub),
+                cpd: anisette.to_plist(true, false, false),
+                operation: "init".to_string(),
+                ps: vec!["s2k".to_string(), "s2k_fo".to_string()],
+                username: username.clone(),
+            },
+        };
+
+        let mut buffer = Vec::new();
+        plist::to_writer_xml(&mut buffer, &init_packet).unwrap();
+
+        let client = crate::client().unwrap();
+        let res = client
+            .post(GSA_ENDPOINT)
+            .headers(gsa_headers)
+            .body(buffer)
+            .send()
+            .await;
+
+        let res = parse_response(res).await.expect("no response from GSA");
+        println!("--- GSA init response ---");
+        for (k, v) in res.iter() {
+            let shown = match k.as_str() {
+                "s" | "B" | "c" => "<redacted>".to_string(),
+                _ => format!("{v:?}"),
+            };
+            println!("  {k} = {shown}");
+        }
+
+        if let Err(e) = check_error(&res) {
+            println!("init reported an error: {e}");
+            return;
+        }
+
+        let sp = res.get("sp").and_then(|v| v.as_string()).unwrap_or("<absent>");
+        println!("\nselected protocol sp = {sp}");
+        println!(
+            "login_email_pass assumes s2k, so this account is {}",
+            if sp == "s2k_fo" { "MISHANDLED" } else { "handled correctly" }
+        );
+    }
+}

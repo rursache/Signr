@@ -383,3 +383,53 @@ mod srp_protocol_probe {
         );
     }
 }
+
+#[cfg(test)]
+mod login_e2e {
+    use super::*;
+
+    /// RS-263 verification: prove a real password is accepted by Apple, without completing 2FA.
+    ///
+    /// The password is read from stdin so it never appears in an argument, an environment
+    /// variable, or the shell history. Getting back a 2FA state IS the success signal: Apple only
+    /// asks for a second factor once the SRP proof has been accepted.
+    ///
+    ///   read -rs "pw?Apple ID password: " && printf '%s' "$pw" | \
+    ///     SIGNR_PROBE_APPLE_ID=you@example.com \
+    ///     cargo test -p plume_core --features tweaks --lib login_e2e -- --ignored --nocapture
+    ///   unset pw
+    #[tokio::test]
+    #[ignore]
+    async fn password_is_accepted_by_apple() {
+        use std::io::Read;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let username = std::env::var("SIGNR_PROBE_APPLE_ID")
+            .expect("set SIGNR_PROBE_APPLE_ID to the Apple ID to test");
+
+        let mut password = String::new();
+        std::io::stdin()
+            .read_to_string(&mut password)
+            .expect("pipe the password into stdin");
+        let password = password.trim_end_matches(['\n', '\r']);
+        assert!(!password.is_empty(), "no password on stdin");
+
+        let anisette = AnisetteData::new().await.expect("no anisette tier succeeded");
+        println!("anisette source: {:?}", anisette.source);
+
+        let mut account = Account::new_with_anisette(anisette).expect("could not build account");
+
+        match account.login_email_pass(&username, password).await {
+            Ok(state) => {
+                // Any of these means the SRP proof was accepted.
+                println!("\nPASSWORD ACCEPTED -> {state:?}");
+                println!("RS-263 verified: anisette + SRP auth work end to end.");
+            }
+            Err(e) => {
+                println!("\nlogin failed: {e}");
+                panic!("password not accepted: {e}");
+            }
+        }
+    }
+}

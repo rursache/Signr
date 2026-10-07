@@ -163,7 +163,7 @@ struct DestinationSection: View {
 
 struct AccountCard: View {
     @Environment(AppModel.self) private var model
-    @State private var emailHidden = false
+    @State private var detailsHidden = false
 
     var body: some View {
         if let account = model.account {
@@ -172,19 +172,19 @@ struct AccountCard: View {
                     avatar(for: account.appleId)
                     accountDropdown(account)
                     Spacer(minLength: 8)
-                    Button { emailHidden.toggle() } label: {
-                        Image(systemName: emailHidden ? "eye.slash" : "eye")
+                    Button { detailsHidden.toggle() } label: {
+                        Image(systemName: detailsHidden ? "eye.slash" : "eye")
                             .font(.caption2).foregroundStyle(.tertiary).contentShape(.rect)
                     }
                     .buttonStyle(.plain)
-                    .help(emailHidden ? "Show email" : "Hide email")
+                    .help(detailsHidden ? "Show account details" : "Hide account details")
                 }
                 HStack(spacing: 6) {
                     if !account.tier.isEmpty {
                         Pill(text: tierLabel(account.tier), color: tierColor(account.tier))
                     }
                     if !account.teamId.isEmpty {
-                        Pill(text: account.teamId)
+                        Pill(text: detailsHidden ? censoredTeamId(account.teamId) : account.teamId)
                     }
                     Spacer()
                     Button("Sign out") { model.signOut() }
@@ -248,7 +248,7 @@ struct AccountCard: View {
                     .font(.system(size: 16)).foregroundStyle(Brand.tint)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(emailHidden ? censoredEmail(account.appleId) : account.appleId.lowercased())
+                Text(detailsHidden ? censoredEmail(account.appleId) : account.appleId.lowercased())
                     .font(.callout.weight(.medium)).lineLimit(1)
                 Text(account.teamName)
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -258,7 +258,7 @@ struct AccountCard: View {
     }
 
     private func teamLabel(_ team: Team) -> String {
-        "\(team.name) · \(team.tier) · \(team.id)"
+        "\(team.name) · \(team.tier) · \(detailsHidden ? censoredTeamId(team.id) : team.id)"
     }
 
     private func tierLabel(_ tier: String) -> String {
@@ -294,6 +294,11 @@ struct AccountCard: View {
         }
         let name = String(repeating: "•", count: max(domain.distance(from: domain.startIndex, to: dot), 1))
         return "\(maskedLocal)@\(name)\(domain[dot...])"
+    }
+
+    private func censoredTeamId(_ id: String) -> String {
+        guard let first = id.first else { return id }
+        return String(first) + String(repeating: "•", count: max(id.count - 1, 1))
     }
 
     @ViewBuilder

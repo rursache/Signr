@@ -38,6 +38,10 @@ final class AppModel {
     var allowRemoteAnisette: Bool {
         didSet { anisetteSettingsChanged() }
     }
+    var anisetteServerChoice: AnisetteServerChoice {
+        didSet { anisetteSettingsChanged() }
+    }
+    /// Only used when `anisetteServerChoice` is `.custom`
     var anisetteServerURL: String {
         didSet { anisetteSettingsChanged() }
     }
@@ -65,15 +69,26 @@ final class AppModel {
 
     private static let allowRemoteAnisetteKey = "allowRemoteAnisette"
     private static let anisetteServerURLKey = "anisetteServerURL"
+    private static let anisetteServerChoiceKey = "anisetteServerChoice"
 
     init() {
         let dir = AppModel.dataDirectory()
         engine = SignrEngine(dataDir: dir.path(percentEncoded: false))
         let allowRemote = UserDefaults.standard.bool(forKey: AppModel.allowRemoteAnisetteKey)
         let serverURL = UserDefaults.standard.string(forKey: AppModel.anisetteServerURLKey) ?? ""
+        let choice: AnisetteServerChoice
+        if let raw = UserDefaults.standard.string(forKey: AppModel.anisetteServerChoiceKey),
+           let stored = AnisetteServerChoice(rawValue: raw) {
+            choice = stored
+        } else {
+            // Before the picker existed a non-empty URL meant a custom server
+            choice = serverURL.trimmingCharacters(in: .whitespaces).isEmpty ? .sidestore : .custom
+        }
         allowRemoteAnisette = allowRemote
+        anisetteServerChoice = choice
         anisetteServerURL = serverURL
-        setAnisetteSettings(allowRemote: allowRemote, serverUrl: serverURL)
+        setAnisetteSettings(allowRemote: allowRemote,
+                            serverUrl: AppModel.resolveServer(choice: choice, customURL: serverURL))
         version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
             ?? coreVersion()
         account = engine.currentAccount()
@@ -104,14 +119,22 @@ final class AppModel {
         hasNativeAnisette == false && !allowRemoteAnisette
     }
 
+    /// Only the custom URL can be invalid, an empty one counts as invalid too
     var anisetteServerURLIsValid: Bool {
-        anisetteServerURL.trimmingCharacters(in: .whitespaces).isEmpty
-            || normalizeServerUrl(url: anisetteServerURL) != nil
+        anisetteServerChoice != .custom || normalizeServerUrl(url: anisetteServerURL) != nil
     }
 
     /// Normalized server the remote tier talks to, empty for the built-in default
     private var effectiveAnisetteServer: String {
-        normalizeServerUrl(url: anisetteServerURL) ?? ""
+        AppModel.resolveServer(choice: anisetteServerChoice, customURL: anisetteServerURL)
+    }
+
+    private static func resolveServer(choice: AnisetteServerChoice, customURL: String) -> String {
+        switch choice {
+        case .sidestore: return ""
+        case .jkcoxson: return normalizeServerUrl(url: AnisetteServerChoice.jkcoxsonURL) ?? ""
+        case .custom: return normalizeServerUrl(url: customURL) ?? ""
+        }
     }
 
     /// Why Apple-facing work can't start right now because of the anisette setup, if it can't
@@ -121,17 +144,18 @@ final class AppModel {
             return "This Mac can't generate anisette data on its own, so Apple sign-in needs a remote anisette server; you can allow it in Settings at the risk of Apple locking the Apple ID"
         }
         if !anisetteServerURLIsValid {
-            return "The anisette server in Settings has to be a full https:// URL"
+            return "The custom anisette server in Settings has to be a full https:// URL"
         }
         return nil
     }
 
     private func pushAnisetteSettings() {
-        setAnisetteSettings(allowRemote: allowRemoteAnisette, serverUrl: anisetteServerURL)
+        setAnisetteSettings(allowRemote: allowRemoteAnisette, serverUrl: effectiveAnisetteServer)
     }
 
     private func anisetteSettingsChanged() {
         UserDefaults.standard.set(allowRemoteAnisette, forKey: AppModel.allowRemoteAnisetteKey)
+        UserDefaults.standard.set(anisetteServerChoice.rawValue, forKey: AppModel.anisetteServerChoiceKey)
         UserDefaults.standard.set(anisetteServerURL, forKey: AppModel.anisetteServerURLKey)
         pushAnisetteSettings()
         // Only a different server is a fresh start after a rejection, toggling won't do
@@ -650,6 +674,24 @@ final class AppModel {
     func appendLog(_ text: String, _ kind: LogLine.Kind) {
         log.append(LogLine(text: text, kind: kind))
         if log.count > 500 { log.removeFirst(log.count - 500) }
+    }
+}
+
+enum AnisetteServerChoice: String, CaseIterable, Identifiable {
+    case sidestore
+    case jkcoxson
+    case custom
+
+    static let jkcoxsonURL = "https://mac-ani.jkcoxson.com"
+
+    var id: Self { self }
+
+    var label: String {
+        switch self {
+        case .sidestore: return "Default (ani.sidestore.app)"
+        case .jkcoxson: return "mac-ani.jkcoxson.com (Mac ADI)"
+        case .custom: return "Custom"
+        }
     }
 }
 

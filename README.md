@@ -63,7 +63,13 @@ Signing happens locally, but signing in still talks to Apple and needs anisette 
 - **macOS 26 and earlier**: Signr uses the anisette data your Mac generates itself, the same path Xcode uses
 - **macOS 27**: Apple blocks apps from reading the Mac's own anisette, so the only option is a remote anisette server, and since October 2026 Apple has been rejecting logins from public anisette servers (error -80045) and locking Apple IDs that keep trying (error -20209, "This Apple Account has been locked for security reasons")
 
-Because of that, the remote fallback is **off by default**, and to use it on macOS 27 you turn it on in the sign-in sheet or in *Settings → Anisette* (where you can also point Signr at a different anisette-v3 server)
+Because of that, the remote fallback is **off by default**, and to use it on macOS 27 you turn it on in the sign-in sheet or in *Settings → Anisette*
+
+The *Server* picker in *Settings → Anisette* chooses which anisette-v3 server the fallback uses:
+
+- **Default**: ani.sidestore.app, the built-in server
+- **mac-ani.jkcoxson.com**: a server that generates anisette with real Mac ADI
+- **Custom**: any anisette-v3 server URL you enter
 
 If `libstoreservicescore.so` is present in `~/Library/Application Support/Signr/anisette`, the fallback uses emulated ADI instead of a server
 

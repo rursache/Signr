@@ -9,12 +9,21 @@ struct SettingsView: View {
             Section {
                 LabeledContent("This Mac") { nativeStatus }
                 Toggle("Allow anisette fallback", isOn: $model.allowRemoteAnisette)
-                TextField("Server", text: $model.anisetteServerURL,
-                          prompt: Text("Default (ani.sidestore.app)"))
-                    .disabled(!model.allowRemoteAnisette)
-                if !model.anisetteServerURLIsValid {
-                    Text("Enter a full URL starting with https://")
-                        .font(.caption).foregroundStyle(.red)
+                Picker("Server", selection: $model.anisetteServerChoice) {
+                    ForEach(AnisetteServerChoice.allCases) { choice in
+                        Text(choice.label).tag(choice)
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(!model.allowRemoteAnisette)
+                if model.anisetteServerChoice == .custom {
+                    TextField("Custom URL", text: $model.anisetteServerURL,
+                              prompt: Text("https://anisette.example.com"))
+                        .disabled(!model.allowRemoteAnisette)
+                    if !model.anisetteServerURLIsValid {
+                        Text("Enter a full URL starting with https://")
+                            .font(.caption).foregroundStyle(.red)
+                    }
                 }
             } header: {
                 Text("Anisette")
@@ -31,7 +40,13 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .scrollDisabled(true)
-        .frame(width: 500, height: 320)
+        .frame(width: 500, height: height)
+    }
+
+    // The form doesn't scroll, so grow the window for the custom URL row and its hint
+    private var height: CGFloat {
+        guard model.anisetteServerChoice == .custom else { return 320 }
+        return model.anisetteServerURLIsValid ? 360 : 395
     }
 
     @ViewBuilder

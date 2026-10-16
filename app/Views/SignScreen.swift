@@ -59,12 +59,20 @@ struct SignScreen: View {
         .toolbar {
             if model.isSignedIn {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    loadMenu
+                    // A menu with an indicator gets its own glass capsule instead of sharing Save's
+                    loadMenu.menuIndicator(.hidden)
                     Button { startSavePreset() } label: {
                         Label("Save", systemImage: "document.badge.plus")
                     }
                     .help("Save the current configuration as a session")
                 }
+            }
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+            ToolbarItem(placement: .primaryAction) {
+                SettingsLink {
+                    Label("Settings", systemImage: "gearshape")
+                }
+                .help("Settings")
             }
         }
         .alert("Save session", isPresented: $showSavePrompt) {

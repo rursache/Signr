@@ -118,6 +118,9 @@ struct SignScreen: View {
             .padding(.horizontal, 22).padding(.top, 10).padding(.bottom, 10)
             .frame(maxWidth: 1240, maxHeight: .infinity)
             .frame(maxWidth: .infinity, alignment: .top)
+            AccountSafetyNotice(appleID: model.account?.appleId)
+                .padding(.horizontal, 22).padding(.bottom, 10)
+                .frame(maxWidth: 1240)
             actionBar
         }
         .fileImporter(

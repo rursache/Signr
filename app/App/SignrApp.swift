@@ -13,5 +13,11 @@ struct SignrApp: App {
         .windowToolbarStyle(.unified)
         .defaultSize(width: 1280, height: 740)
         .windowResizability(.contentSize)
+
+        Settings {
+            SettingsView()
+                .environment(model)
+        }
+        .windowResizability(.contentSize)
     }
 }

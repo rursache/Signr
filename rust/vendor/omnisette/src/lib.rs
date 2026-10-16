@@ -64,6 +64,7 @@ pub struct AnisetteConfiguration {
     anisette_url: String,
     anisette_url_v3: String,
     configuration_path: PathBuf,
+    remote_configuration_path: Option<PathBuf>,
     macos_serial: String,
 }
 
@@ -79,6 +80,7 @@ impl AnisetteConfiguration {
             anisette_url: DEFAULT_ANISETTE_URL.to_string(),
             anisette_url_v3: DEFAULT_ANISETTE_URL_V3.to_string(),
             configuration_path: PathBuf::new(),
+            remote_configuration_path: None,
             macos_serial: "0".to_string(),
         }
     }
@@ -93,6 +95,18 @@ impl AnisetteConfiguration {
 
     pub fn set_anisette_url(mut self, anisette_url: String) -> AnisetteConfiguration {
         self.anisette_url = anisette_url;
+        self
+    }
+
+    pub fn set_anisette_url_v3(mut self, anisette_url_v3: String) -> AnisetteConfiguration {
+        self.anisette_url_v3 = anisette_url_v3;
+        self
+    }
+
+    /// Where the remote provider keeps its provisioning state, which only works against the
+    /// server that minted it, so each server needs its own directory
+    pub fn set_remote_configuration_path(mut self, path: PathBuf) -> AnisetteConfiguration {
+        self.remote_configuration_path = Some(path);
         self
     }
 
@@ -148,7 +162,10 @@ impl AnisetteHeaders {
         return Ok(AnisetteHeadersProviderRes::remote(Box::new(
             remote_anisette_v3::RemoteAnisetteProviderV3::new(
                 configuration.anisette_url_v3,
-                configuration.configuration_path.clone(),
+                configuration
+                    .remote_configuration_path
+                    .clone()
+                    .unwrap_or_else(|| configuration.configuration_path.clone()),
                 configuration.macos_serial.clone(),
             ),
         )));

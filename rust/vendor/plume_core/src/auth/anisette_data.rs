@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
 
 use omnisette::{AnisetteConfiguration, AnisetteHeaders, AnisetteHeadersProviderType};
@@ -32,6 +33,54 @@ fn anisette_config_path() -> PathBuf {
         .join("anisette")
 }
 
+/// User controls for the tiers below native. Apple has been locking accounts (-20209) that
+/// log in with public anisette servers, so falling back is opt-in, emulated ADI included
+/// since it runs the same Android CoreADI the rejected servers use
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AnisetteSettings {
+    pub allow_fallback: bool,
+    /// anisette-v3 server to use instead of the default one
+    pub server_url: Option<String>,
+}
+
+static SETTINGS: RwLock<AnisetteSettings> = RwLock::new(AnisetteSettings {
+    allow_fallback: false,
+    server_url: None,
+});
+
+pub fn set_anisette_settings(settings: AnisetteSettings) {
+    *SETTINGS.write().unwrap_or_else(|e| e.into_inner()) = settings;
+}
+
+pub fn anisette_settings() -> AnisetteSettings {
+    SETTINGS.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// True when this Mac hands out its own anisette (macOS 26 and earlier)
+pub fn native_anisette_available() -> bool {
+    native_anisette::base_headers().is_ok()
+}
+
+/// Remote state for the default server stays in the base directory so existing installs keep
+/// their provisioning, custom servers get a subdirectory named after the URL
+fn remote_state_path(base: &std::path::Path, server_url: Option<&str>) -> PathBuf {
+    match server_url {
+        None => base.to_path_buf(),
+        Some(url) => {
+            let trimmed = url.trim_end_matches('/');
+            let name: String = trimmed
+                .split_once("://")
+                .map_or(trimmed, |(_, rest)| rest)
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+                .collect();
+            // "." or ".." would point outside servers/
+            let name = if name.trim_matches('.').is_empty() { "_".to_string() } else { name };
+            base.join("servers").join(name)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AnisetteData {
     pub base_headers: HashMap<String, String>,
@@ -48,8 +97,12 @@ impl AnisetteData {
             Ok(Ok(base_headers)) => {
                 return Ok(Self::from_headers(base_headers, AnisetteSource::Native));
             }
-            Ok(Err(e)) => log::warn!("native anisette unavailable ({e}), falling back"),
-            Err(_) => log::warn!("native anisette panicked, falling back"),
+            Ok(Err(e)) => log::warn!("native anisette unavailable ({e})"),
+            Err(_) => log::warn!("native anisette panicked"),
+        }
+
+        if !anisette_settings().allow_fallback {
+            return Err(Error::AnisetteFallbackDisabled);
         }
 
         // Tiers 2 and 3. Each attempt builds a fresh provider. Native stays a
@@ -64,9 +117,15 @@ impl AnisetteData {
 
     /// Emulated ADI when `libstoreservicescore.so` is provisioned, otherwise remote v3
     async fn fetch_fallback() -> Result<Self, Error> {
-        let config = AnisetteConfiguration::new()
-            .set_configuration_path(anisette_config_path())
+        let settings = anisette_settings();
+        let base = anisette_config_path();
+        let mut config = AnisetteConfiguration::new()
+            .set_remote_configuration_path(remote_state_path(&base, settings.server_url.as_deref()))
+            .set_configuration_path(base)
             .set_macos_serial(native_anisette::machine_serial().unwrap_or_else(|| "0".to_string()));
+        if let Some(url) = settings.server_url {
+            config = config.set_anisette_url_v3(url);
+        }
 
         let mut res = AnisetteHeaders::get_anisette_headers_provider(config)?;
         let source = match &res.provider_type {
@@ -107,8 +166,9 @@ impl AnisetteData {
         client_info: bool,
         app_info: bool,
     ) -> HashMap<String, String> {
+        // Stale headers get a clean error back from Apple, a panic here kills the whole sign
         if !self.is_valid() {
-            panic!("Invalid data!")
+            log::warn!("anisette data is stale and could not be refreshed");
         }
 
         let mut headers = self.base_headers.clone();
@@ -274,6 +334,30 @@ mod tests {
     fn source_is_recorded() {
         let data = headers_with("<iMac21,1> <macOS;27.0;26A428> <a (b)>");
         assert_eq!(data.source, AnisetteSource::Native);
+    }
+
+    #[test]
+    fn default_server_keeps_base_state_dir() {
+        let base = PathBuf::from("/x/anisette");
+        assert_eq!(remote_state_path(&base, None), base);
+    }
+
+    #[test]
+    fn custom_server_gets_its_own_state_dir() {
+        let base = PathBuf::from("/x/anisette");
+        assert_eq!(
+            remote_state_path(&base, Some("https://mac-ani.example.com/")),
+            base.join("servers/mac-ani.example.com")
+        );
+        assert_eq!(
+            remote_state_path(&base, Some("http://10.0.0.2:6969")),
+            base.join("servers/10.0.0.2_6969")
+        );
+        assert_eq!(remote_state_path(&base, Some("https://..")), base.join("servers/_"));
+        assert_ne!(
+            remote_state_path(&base, Some("https://a.example/?u=http://x")),
+            remote_state_path(&base, Some("https://b.example/?u=http://x"))
+        );
     }
 
     #[test]

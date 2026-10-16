@@ -56,6 +56,23 @@ xcodebuild -scheme Signr -destination 'platform=macOS,arch=arm64' test
 2. **Connect a device**: plug in an iPhone or iPad over USB and tap *Trust* on the device when asked
 3. **Sign & Install**: drag in an `.ipa`, pick the target device (or choose *Export signed .ipa*), adjust any options, and click *Sign & Install*
 
+## Account safety
+
+Signing happens locally, but signing in still talks to Apple and needs anisette data (the device fingerprint Apple expects with every login)
+
+- **macOS 26 and earlier**: Signr uses the anisette data your Mac generates itself, the same path Xcode uses
+- **macOS 27**: Apple blocks apps from reading the Mac's own anisette, so the only option is a remote anisette server, and since October 2026 Apple has been rejecting logins from public anisette servers (error -80045) and locking Apple IDs that keep trying (error -20209, "This Apple Account has been locked for security reasons")
+
+Because of that, the remote fallback is **off by default**, and to use it on macOS 27 you turn it on in the sign-in sheet or in *Settings → Anisette* (where you can also point Signr at a different anisette-v3 server)
+
+If `libstoreservicescore.so` is present in `~/Library/Application Support/Signr/anisette`, the fallback uses emulated ADI instead of a server
+
+If you do turn it on:
+
+- Use a dedicated Apple ID, not your main one
+- Don't keep retrying after a failed login, Signr pauses sign-in after -80045 (until you change the server or restart) and after -20209 (until you confirm the account is unlocked)
+- If your Apple ID gets locked, unlock it at [iforgot.apple.com](https://iforgot.apple.com) before trying again
+
 ## Thanks
 
 Signr started from [PlumeImpactor](https://github.com/claration/Impactor) as its base and iterated from there, building on and extending parts of its Rust signing core, with huge thanks to its authors for the groundwork

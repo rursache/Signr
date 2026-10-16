@@ -33,6 +33,20 @@ final class AppModel {
     var errorMessage: String?
     var lastSigned: SignedApp?
 
+    // The anisette fallback is opt-in because Apple locks Apple IDs that log in through public
+    // anisette servers
+    var allowRemoteAnisette: Bool {
+        didSet { anisetteSettingsChanged() }
+    }
+    var anisetteServerURL: String {
+        didSet { anisetteSettingsChanged() }
+    }
+    /// nil until probed at launch
+    var hasNativeAnisette: Bool?
+    /// Set after Apple answers with a lock or an anisette rejection, so the user can't keep
+    /// retrying into it for the rest of the session
+    var authBlock: AuthBlock?
+
     // Sheets
     var showSignIn = false
     var showActivity = false
@@ -49,9 +63,17 @@ final class AppModel {
     private var deviceBridge: DeviceBridge?
     private var didAutoSelectDevice = false
 
+    private static let allowRemoteAnisetteKey = "allowRemoteAnisette"
+    private static let anisetteServerURLKey = "anisetteServerURL"
+
     init() {
         let dir = AppModel.dataDirectory()
         engine = SignrEngine(dataDir: dir.path(percentEncoded: false))
+        let allowRemote = UserDefaults.standard.bool(forKey: AppModel.allowRemoteAnisetteKey)
+        let serverURL = UserDefaults.standard.string(forKey: AppModel.anisetteServerURLKey) ?? ""
+        allowRemoteAnisette = allowRemote
+        anisetteServerURL = serverURL
+        setAnisetteSettings(allowRemote: allowRemote, serverUrl: serverURL)
         version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
             ?? coreVersion()
         account = engine.currentAccount()
@@ -65,6 +87,93 @@ final class AppModel {
         }
         loadHistory()
         loadPresets()
+        probeNativeAnisette()
+    }
+
+    // MARK: - Anisette
+
+    /// Re-run when the sign-in sheet opens so one slow akd reply at launch doesn't stick
+    func probeNativeAnisette() {
+        Task {
+            hasNativeAnisette = await Task.detached { nativeAnisetteAvailable() }.value
+        }
+    }
+
+    /// Signing in can't work until the user allows the remote fallback
+    var needsRemoteAnisetteConsent: Bool {
+        hasNativeAnisette == false && !allowRemoteAnisette
+    }
+
+    var anisetteServerURLIsValid: Bool {
+        anisetteServerURL.trimmingCharacters(in: .whitespaces).isEmpty
+            || normalizeServerUrl(url: anisetteServerURL) != nil
+    }
+
+    /// Normalized server the remote tier talks to, empty for the built-in default
+    private var effectiveAnisetteServer: String {
+        normalizeServerUrl(url: anisetteServerURL) ?? ""
+    }
+
+    /// Why Apple-facing work can't start right now because of the anisette setup, if it can't
+    var anisetteProblem: String? {
+        guard hasNativeAnisette == false else { return nil }
+        if !allowRemoteAnisette {
+            return "This Mac can't generate anisette data on its own, so Apple sign-in needs a remote anisette server; you can allow it in Settings at the risk of Apple locking the Apple ID"
+        }
+        if !anisetteServerURLIsValid {
+            return "The anisette server in Settings has to be a full https:// URL"
+        }
+        return nil
+    }
+
+    private func pushAnisetteSettings() {
+        setAnisetteSettings(allowRemote: allowRemoteAnisette, serverUrl: anisetteServerURL)
+    }
+
+    private func anisetteSettingsChanged() {
+        UserDefaults.standard.set(allowRemoteAnisette, forKey: AppModel.allowRemoteAnisetteKey)
+        UserDefaults.standard.set(anisetteServerURL, forKey: AppModel.anisetteServerURLKey)
+        pushAnisetteSettings()
+        // Only a different server is a fresh start after a rejection, toggling won't do
+        if case .anisetteRejected(let server) = authBlock, server != effectiveAnisetteServer {
+            authBlock = nil
+        }
+    }
+
+    /// The block that applies to this Apple ID, if any (an anisette rejection applies to all)
+    func activeBlock(for appleID: String?) -> AuthBlock? {
+        switch authBlock {
+        case .accountLocked(let locked):
+            guard let appleID, locked.caseInsensitiveCompare(appleID) == .orderedSame else { return nil }
+            return authBlock
+        case .anisetteRejected, nil:
+            return authBlock
+        }
+    }
+
+    func clearAccountLock() {
+        guard let block = authBlock, case .accountLocked = block else { return }
+        authBlock = nil
+        if errorMessage == block.message { errorMessage = nil }
+    }
+
+    /// Readable text for an Apple-facing failure, locks and rejections also set `authBlock`
+    private func describe(_ error: Error, appleID: String?) -> String {
+        guard let e = error as? SignrError else { return error.localizedDescription }
+        switch e {
+        case .AccountLocked:
+            let block = AuthBlock.accountLocked(appleID: appleID ?? "")
+            authBlock = block
+            return block.message
+        case .AnisetteRejected:
+            let block = AuthBlock.anisetteRejected(server: effectiveAnisetteServer)
+            authBlock = block
+            return block.message
+        case .AnisetteFallbackDisabled:
+            return "This Mac can't generate anisette data on its own, so Apple sign-in needs a remote anisette server; you can allow it in Settings at the risk of Apple locking the Apple ID"
+        default:
+            return error.localizedDescription
+        }
     }
 
     // MARK: - Persistence (opaque encrypted blobs in the app data directory)
@@ -181,6 +290,11 @@ final class AppModel {
 
     func signIn(appleID: String, password: String) {
         guard !isWorking else { return }
+        if let reason = activeBlock(for: appleID)?.message ?? anisetteProblem {
+            errorMessage = reason
+            appendLog(reason, .error)
+            return
+        }
         beginWork()
         let progress = makeObserver()
         let tfa = TwoFactorBridge(handler: { [weak self] request in
@@ -203,8 +317,9 @@ final class AppModel {
                 if AppModel.isCancellation(error) {
                     self.appendLog("Sign-in cancelled", .info)
                 } else {
-                    self.errorMessage = error.localizedDescription
-                    self.appendLog(error.localizedDescription, .error)
+                    let message = self.describe(error, appleID: appleID)
+                    self.errorMessage = message
+                    self.appendLog(message, .error)
                 }
             }
             self.endWork()
@@ -238,10 +353,14 @@ final class AppModel {
     /// restored session. Best-effort — keeps the stored account if offline/expired.
     func refreshAccountOnLaunch() async {
         guard isSignedIn else { return }
-        if let refreshed = try? await engine.refreshTeams() {
-            account = refreshed
+        do {
+            account = try await engine.refreshTeams()
             teams = engine.listTeams()
             saveAccountCache()
+        } catch {
+            // Stay quiet unless Apple said to stop
+            let message = describe(error, appleID: account?.appleId)
+            if authBlock != nil { appendLog(message, .error) }
         }
     }
 
@@ -327,12 +446,18 @@ final class AppModel {
 
     func signAndInstall(ipa: URL, options: SignOptions) {
         guard !isWorking else { return }
+        if let reason = activeBlock(for: account?.appleId)?.message ?? anisetteProblem {
+            errorMessage = reason
+            appendLog(reason, .error)
+            return
+        }
         beginWork()
         lastSigned = nil
         let observer = makeObserver()
         let deviceID = selectedDeviceID
         let targetName = selectedDevice?.name
         let fallbackName = ipa.deletingPathExtension().lastPathComponent
+        let appleID = account?.appleId
         Task {
             do {
                 let signed = try await engine.signAndInstall(
@@ -371,14 +496,15 @@ final class AppModel {
                 if wasCancelled {
                     self.appendLog("Cancelled", .info)
                 } else {
-                    self.errorMessage = error.localizedDescription
-                    self.appendLog(error.localizedDescription, .error)
+                    let message = self.describe(error, appleID: appleID)
+                    self.errorMessage = message
+                    self.appendLog(message, .error)
                     self.recordHistory(
                         appName: options.customName ?? fallbackName,
                         bundleId: options.customBundleId ?? "",
                         target: targetName ?? "Export",
                         success: false,
-                        detail: error.localizedDescription)
+                        detail: message)
                 }
             }
         }
@@ -524,6 +650,21 @@ final class AppModel {
     func appendLog(_ text: String, _ kind: LogLine.Kind) {
         log.append(LogLine(text: text, kind: kind))
         if log.count > 500 { log.removeFirst(log.count - 500) }
+    }
+}
+
+enum AuthBlock: Equatable {
+    case accountLocked(appleID: String)
+    /// `server` is the normalized URL that got rejected, empty for the default one
+    case anisetteRejected(server: String)
+
+    var message: String {
+        switch self {
+        case .accountLocked:
+            return "Apple locked this Apple ID for security reasons (-20209), unlock it at iforgot.apple.com first since retrying while it's locked only makes things worse"
+        case .anisetteRejected:
+            return "Apple rejected the anisette data from the remote server (-80045), so sign-in is paused to keep repeated attempts from getting the Apple ID locked; pick another server in Settings or restart Signr"
+        }
     }
 }
 

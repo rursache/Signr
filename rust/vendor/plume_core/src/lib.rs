@@ -51,6 +51,8 @@ pub enum Error {
     Reqwest(#[from] reqwest::Error),
     #[error("Anisette error: {0}")]
     Anisette(#[from] native_anisette::NativeAnisetteError),
+    #[error("This Mac can't generate anisette data itself and the remote anisette fallback is turned off")]
+    AnisetteFallbackDisabled,
     #[error("Anisette provider error: {0}")]
     AnisetteProvider(#[from] omnisette::AnisetteError),
     #[error("Serde JSON error: {0}")]

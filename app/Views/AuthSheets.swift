@@ -76,7 +76,9 @@ struct SignInSheet: View {
                 }
                 .textFieldStyle(.roundedBorder)
 
-                if let error = model.errorMessage {
+                AccountSafetyNotice(appleID: appleID, inlineConsent: true)
+
+                if let error = model.errorMessage, model.activeBlock(for: appleID) == nil {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(.red)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -97,7 +99,9 @@ struct SignInSheet: View {
                     }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
-                    .disabled(appleID.isEmpty || password.isEmpty || model.isWorking)
+                    .disabled(appleID.isEmpty || password.isEmpty || model.isWorking
+                               || model.anisetteProblem != nil
+                               || model.activeBlock(for: appleID) != nil)
                 }
 
                 Text("Tip: a free Apple ID works (7-day re-sign limit).")
@@ -108,6 +112,7 @@ struct SignInSheet: View {
         .padding(24)
         .frame(width: 380)
         .interactiveDismissDisabled(model.isWorking)
+        .onAppear { model.probeNativeAnisette() }
     }
 
     private func submit() {

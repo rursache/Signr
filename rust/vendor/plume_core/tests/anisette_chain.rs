@@ -4,7 +4,7 @@
 //! manual check rather than part of the normal suite. Run with:
 //!   cargo test -p plume_core --features tweaks --test anisette_chain -- --ignored --nocapture
 
-use plume_core::auth::anisette_data::AnisetteData;
+use plume_core::auth::anisette_data::{AnisetteData, AnisetteSettings, set_anisette_settings};
 
 const REQUIRED: [&str; 7] = [
     "X-Apple-I-MD",
@@ -21,6 +21,8 @@ const REQUIRED: [&str; 7] = [
 async fn chain_yields_usable_headers_on_this_machine() {
     // SignrEngine does this at startup; the remote tier needs TLS.
     let _ = rustls::crypto::ring::default_provider().install_default();
+    // Exercising the whole chain means opting in to the tiers below native
+    set_anisette_settings(AnisetteSettings { allow_fallback: true, server_url: None });
 
     let data = AnisetteData::new().await.expect("no anisette tier succeeded");
     println!("source: {:?}", data.source);

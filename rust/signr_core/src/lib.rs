@@ -42,6 +42,12 @@ pub enum SignrError {
     Io { message: String },
     #[error("Operation cancelled")]
     Cancelled,
+    #[error("Apple locked this Apple ID: {message}")]
+    AccountLocked { message: String },
+    #[error("Apple rejected the anisette data: {message}")]
+    AnisetteRejected { message: String },
+    #[error("This Mac can't generate anisette data and the remote fallback is turned off")]
+    AnisetteFallbackDisabled,
     #[error("{message}")]
     Unexpected { message: String },
 }
@@ -85,6 +91,26 @@ fn block_on_caught<T>(
 
 fn auth_err<E: std::fmt::Display>(e: E) -> SignrError {
     SignrError::Auth { message: e.to_string() }
+}
+
+/// GrandSlam answers that mean retrying is pointless or, worse, is what gets the account
+/// locked (codes come back negative but are matched on magnitude)
+pub fn classify_core_error(e: &plume_core::Error) -> Option<SignrError> {
+    match e {
+        plume_core::Error::AnisetteFallbackDisabled => Some(SignrError::AnisetteFallbackDisabled),
+        plume_core::Error::AuthSrpWithMessage(code, message) => match code.unsigned_abs() {
+            20209 => Some(SignrError::AccountLocked { message: message.clone() }),
+            80045 => Some(SignrError::AnisetteRejected { message: message.clone() }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+fn core_auth_err(e: plume_core::Error) -> SignrError {
+    classify_core_error(&e).unwrap_or_else(|| auth_err(e))
+}
+fn core_sign_err(e: plume_core::Error) -> SignrError {
+    classify_core_error(&e).unwrap_or_else(|| sign_err(e))
 }
 fn io_err<E: std::fmt::Display>(e: E) -> SignrError {
     SignrError::Io { message: e.to_string() }
@@ -632,7 +658,7 @@ async fn run_sign_and_install(
         .clone();
     let session = DeveloperSession::new(gsa.adsid().clone(), gsa.xcode_gs_token().clone())
         .await
-    .map_err(auth_err)?;
+    .map_err(core_auth_err)?;
     let team_id = gsa.team_id().clone();
     check()?;
 
@@ -646,7 +672,7 @@ async fn run_sign_and_install(
         None,
     )
     .await
-    .map_err(sign_err)?;
+    .map_err(core_sign_err)?;
     check()?;
 
     observer.on_stage(SignStage::Preparing, 0.25, "Unpacking IPA…".into());
@@ -673,7 +699,7 @@ async fn run_sign_and_install(
     let is_free = session
         .qh_list_teams()
         .await
-        .map_err(auth_err)?
+        .map_err(core_auth_err)?
         .teams
         .iter()
         .find(|t| t.team_id == team_id)
@@ -916,7 +942,7 @@ impl SignrEngine {
                     },
                 )
                 .await
-                .map_err(auth_err)
+                .map_err(core_auth_err)
             });
             let _ = done_tx.send(result);
         });
@@ -953,8 +979,8 @@ impl SignrEngine {
         let (first_name, _last) = account.get_name();
         let session = DeveloperSession::using_account(account)
             .await
-            .map_err(auth_err)?;
-        let plume_teams = session.qh_list_teams().await.map_err(auth_err)?.teams;
+            .map_err(core_auth_err)?;
+        let plume_teams = session.qh_list_teams().await.map_err(core_auth_err)?.teams;
         if plume_teams.is_empty() {
             return Err(SignrError::Auth {
                 message: "No development teams found on this Apple ID".into(),
@@ -1009,8 +1035,8 @@ impl SignrEngine {
             .clone();
         let session = DeveloperSession::new(gsa.adsid().clone(), gsa.xcode_gs_token().clone())
             .await
-        .map_err(auth_err)?;
-        let plume_teams = session.qh_list_teams().await.map_err(auth_err)?.teams;
+        .map_err(core_auth_err)?;
+        let plume_teams = session.qh_list_teams().await.map_err(core_auth_err)?.teams;
         if plume_teams.is_empty() {
             return Err(SignrError::Auth {
                 message: "No development teams found on this Apple ID".into(),
@@ -1180,6 +1206,35 @@ impl SignrEngine {
 // ============================================================================
 // Free functions (simple smoke tests)
 // ============================================================================
+
+/// Whether to fall back to emulated or remote anisette when this Mac can't generate its own,
+/// and which anisette-v3 server to use. Empty URL means the built-in default
+#[uniffi::export]
+pub fn set_anisette_settings(allow_remote: bool, server_url: Option<String>) {
+    plume_core::auth::anisette_data::set_anisette_settings(
+        plume_core::auth::anisette_data::AnisetteSettings {
+            allow_fallback: allow_remote,
+            server_url: normalize_server_url(server_url),
+        },
+    );
+}
+
+/// Trimmed URL, or None when empty or not an http(s) URL with a host
+#[uniffi::export]
+pub fn normalize_server_url(url: Option<String>) -> Option<String> {
+    let url = url?.trim().trim_end_matches('/').to_string();
+    let (scheme, rest) = url.split_once("://")?;
+    let valid = matches!(scheme, "https" | "http") && !rest.is_empty();
+    valid.then_some(url)
+}
+
+/// Blocking XPC round-trip to akd, call it off the main thread
+#[uniffi::export]
+pub fn native_anisette_available() -> bool {
+    // A panic would reach Swift through try! and crash the app at launch
+    std::panic::catch_unwind(plume_core::auth::anisette_data::native_anisette_available)
+        .unwrap_or(false)
+}
 
 #[uniffi::export]
 pub fn core_version() -> String {

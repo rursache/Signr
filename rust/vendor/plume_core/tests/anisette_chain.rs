@@ -1,17 +1,19 @@
-//! End-to-end check of the anisette fallback chain (RS-263).
+//! End-to-end check of the anisette chain (RS-263)
 //!
-//! Ignored by default: the remote tier talks to a third-party anisette server, so this is a
-//! manual check rather than part of the normal suite. Run with:
+//! Ignored by default: on a Mac without native anisette it provisions a new identity with
+//! gsa.apple.com through the default server and replaces the one stored in Signr's anisette
+//! folder, it never logs in, run it with:
 //!   cargo test -p plume_core --features tweaks --test anisette_chain -- --ignored --nocapture
 
-use plume_core::auth::anisette_data::{AnisetteData, AnisetteSettings, set_anisette_settings};
+use plume_core::auth::anisette_data::{
+    AnisetteData, AnisetteSettings, AnisetteSource, set_anisette_settings,
+};
 
-const REQUIRED: [&str; 7] = [
+const REQUIRED: [&str; 6] = [
     "X-Apple-I-MD",
     "X-Apple-I-MD-M",
     "X-Apple-I-MD-RINFO",
     "X-Apple-I-MD-LU",
-    "X-Apple-I-SRL-NO",
     "X-Mme-Client-Info",
     "X-Mme-Device-Id",
 ];
@@ -21,13 +23,12 @@ const REQUIRED: [&str; 7] = [
 async fn chain_yields_usable_headers_on_this_machine() {
     // SignrEngine does this at startup; the remote tier needs TLS.
     let _ = rustls::crypto::ring::default_provider().install_default();
-    // Exercising the whole chain means opting in to the tiers below native
     set_anisette_settings(AnisetteSettings { allow_fallback: true, server_url: None });
 
     let data = AnisetteData::new().await.expect("no anisette tier succeeded");
     println!("source: {:?}", data.source);
 
-    let headers = data.generate_headers(false, true, true);
+    let headers = data.developer_headers().expect("unusable headers");
     for k in REQUIRED {
         assert!(
             headers.get(k).is_some_and(|v| !v.is_empty()),
@@ -35,13 +36,20 @@ async fn chain_yields_usable_headers_on_this_machine() {
             data.source
         );
     }
+    assert!(!data.user_agent.is_empty());
 
-    let client_info = &headers["X-Mme-Client-Info"];
+    let client_info = headers["X-Mme-Client-Info"].to_str().unwrap();
+    println!("client-info: {client_info}");
+    println!("user agent: {}", data.user_agent);
     assert!(client_info.contains("com.apple.akd/1.0"), "got {client_info}");
-    assert!(!client_info.contains("dt.Xcode"), "got {client_info}");
-
-    // macOS 27 must not be silently served by the dead native tier.
-    if cfg!(target_os = "macos") {
-        println!("client-info: {client_info}");
+    if data.source == AnisetteSource::RemoteV3 {
+        assert!(!client_info.contains("<Android;") && !client_info.contains("13.1;22C65"));
+        assert!(headers.get("X-Apple-I-SRL-NO").is_none());
     }
+
+    let refreshed = data.refresh().await.expect("refresh failed");
+    assert_eq!(
+        refreshed.base_headers.get("X-Mme-Device-Id"),
+        data.base_headers.get("X-Mme-Device-Id")
+    );
 }

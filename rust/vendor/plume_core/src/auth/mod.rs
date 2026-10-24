@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::auth::anisette_data::AnisetteData;
-use crate::{Error, client};
+use crate::{Error, gsa_client};
 
 const GSA_ENDPOINT: &str = "https://gsa.apple.com/grandslam/GsService2";
 
@@ -25,7 +25,7 @@ impl Account {
     }
 
     pub fn new_with_anisette(anisette: AnisetteData) -> Result<Self, Error> {
-        let client = client()?;
+        let client = gsa_client()?;
         Ok(Account {
             anisette: Arc::new(Mutex::new(anisette)),
             spd: None,

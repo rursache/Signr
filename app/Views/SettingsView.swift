@@ -30,9 +30,8 @@ struct SettingsView: View {
             } footer: {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Apple sign-in needs anisette data, macOS 26 and earlier generate it locally which is the safe path")
-                    Text("On macOS 27 it has to come from a remote server, and Apple has been locking Apple IDs (-20209) that log in through public ones")
-                    Text("Only turn this on with a dedicated Apple ID and stop after a failed login instead of retrying")
-                    Text("The fallback uses emulated ADI instead of the server when libstoreservicescore.so is in Signr's anisette folder")
+                    Text("On macOS 27 it has to come from a remote server that runs Mac ADI, Apple rejects Android and Windows anisette (-80045, -80046) and Signr refuses those servers before contacting Apple")
+                    Text("Apple has been locking Apple IDs (-20209) that log in through public servers, so only turn this on with a dedicated Apple ID and stop after a failed login instead of retrying")
                 }
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -45,8 +44,8 @@ struct SettingsView: View {
 
     // The form doesn't scroll, so grow the window for the custom URL row and its hint
     private var height: CGFloat {
-        guard model.anisetteServerChoice == .custom else { return 320 }
-        return model.anisetteServerURLIsValid ? 360 : 395
+        guard model.anisetteServerChoice == .custom else { return 300 }
+        return model.anisetteServerURLIsValid ? 340 : 375
     }
 
     @ViewBuilder

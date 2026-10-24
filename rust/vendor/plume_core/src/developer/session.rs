@@ -1,4 +1,3 @@
-use reqwest::header::HeaderName;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -39,7 +38,7 @@ impl DeveloperSession {
 
         Ok(DeveloperSession {
             anisette: account.anisette.clone(),
-            client: account.client.clone(),
+            client: crate::client()?,
             adsid: adsid.into(),
             xcode_gs_token,
         })
@@ -90,7 +89,7 @@ impl DeveloperSession {
         headers.insert("Content-Type", HeaderValue::from_static("text/x-xml-plist"));
         headers.insert("Accept", HeaderValue::from_static("text/x-xml-plist"));
         self.insert_identity_headers(&mut headers).await;
-        self.insert_anisette_headers(&mut headers).await;
+        self.insert_anisette_headers(&mut headers).await?;
 
         let mut body = body.unwrap_or_default();
         body.insert(
@@ -106,8 +105,13 @@ impl DeveloperSession {
         log::debug!("QH Request to {}: {:?}", url, body);
 
         let response = request_builder.body(buffer).send().await?;
+        let status = response.status();
         let response_bytes = response.bytes().await?;
-        let response_dict: Dictionary = plist::from_bytes(&response_bytes)?;
+        let response_dict: Dictionary = match plist::from_bytes(&response_bytes) {
+            Ok(dict) => dict,
+            Err(_) if !status.is_success() => return Err(http_error(url, status.as_u16())),
+            Err(e) => return Err(e.into()),
+        };
 
         log::debug!("QH Response from {}: {:?}", url, response_dict);
 
@@ -144,7 +148,7 @@ impl DeveloperSession {
         if let Some(RequestType::Get) = request_type {
             headers.insert("X-HTTP-Method-Override", HeaderValue::from_static("GET"));
         }
-        self.insert_anisette_headers(&mut headers).await;
+        self.insert_anisette_headers(&mut headers).await?;
 
         let mut request_builder = match request_type {
             Some(RequestType::Patch) => self.client.patch(url).headers(headers.clone()),
@@ -161,11 +165,16 @@ impl DeveloperSession {
         }
 
         let response = request_builder.send().await?;
+        let status = response.status();
         let response_text = response.text().await?;
 
         log::debug!("V1 Response from {}: {}", url, response_text);
 
-        let response_json: serde_json::Value = serde_json::from_str(&response_text)?;
+        let response_json: serde_json::Value = match serde_json::from_str(&response_text) {
+            Ok(json) => json,
+            Err(_) if !status.is_success() => return Err(http_error(url, status.as_u16())),
+            Err(e) => return Err(e.into()),
+        };
 
         if let Ok(errors) = serde_json::from_value::<V1ErrorResponse>(response_json.clone()) {
             return Err(errors.errors[0].to_error(url.to_string()));
@@ -188,17 +197,12 @@ impl DeveloperSession {
         );
     }
 
-    async fn insert_anisette_headers(&self, headers: &mut HeaderMap) {
-        let valid_anisette = self.get_anisette().await;
-        for (k, v) in valid_anisette.generate_headers(false, true, true) {
-            headers.insert(
-                HeaderName::from_bytes(k.as_bytes()).unwrap(),
-                HeaderValue::from_str(&v).unwrap(),
-            );
+    async fn insert_anisette_headers(&self, headers: &mut HeaderMap) -> Result<(), Error> {
+        let developer_headers = self.get_anisette().await.developer_headers()?;
+        for (k, v) in developer_headers.iter() {
+            headers.insert(k.clone(), v.clone());
         }
-        if let Ok(locale) = valid_anisette.get_header("x-apple-locale") {
-            headers.insert("X-Apple-Locale", HeaderValue::from_str(&locale).unwrap());
-        }
+        Ok(())
     }
 
     // TODO: deduplicate?
@@ -214,6 +218,16 @@ impl DeveloperSession {
             }
         }
         locked.clone()
+    }
+}
+
+/// Apple's edge answers with HTML pages when it rejects a client, keep the status code
+fn http_error(url: &str, status: u16) -> Error {
+    Error::DeveloperApi {
+        url: url.to_string(),
+        result_code: 0,
+        http_code: Some(status),
+        message: format!("HTTP {status}"),
     }
 }
 

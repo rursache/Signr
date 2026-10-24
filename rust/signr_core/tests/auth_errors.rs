@@ -14,6 +14,58 @@ fn anisette_rejection_is_classified() {
 }
 
 #[test]
+fn every_anisette_rejection_keeps_its_code() {
+    for code in [-80045, -80046, -22421] {
+        let e = Error::AuthSrpWithMessage(code, "rejected".into());
+        match classify_core_error(&e) {
+            Some(SignrError::AnisetteRejected { code: got, .. }) => assert_eq!(got, -code),
+            other => panic!("{code} classified as {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn old_mac_identity_is_classified() {
+    let e = Error::AuthSrpWithMessage(-23782, "A Mac with macOS version 10.13 or later".into());
+    assert!(matches!(classify_core_error(&e), Some(SignrError::AccountNeedsNewerMac { .. })));
+}
+
+#[test]
+fn non_mac_server_is_classified() {
+    let e = Error::AnisetteProvider(plume_core::omnisette::AnisetteError::UnsupportedServerIdentity {
+        client_info: "<MacBookPro13,2> <macOS;13.1;22C65> <x>".into(),
+    });
+    assert!(matches!(
+        classify_core_error(&e),
+        Some(SignrError::AnisetteServerUnsupported { .. })
+    ));
+}
+
+#[test]
+fn apple_outages_are_classified() {
+    for status in [429, 503] {
+        let e = Error::GsaHttp { url: "u".into(), status };
+        assert!(matches!(
+            classify_core_error(&e),
+            Some(SignrError::AppleUnavailable { status: s }) if s == status
+        ));
+    }
+    let e = Error::GsaHttp { url: "u".into(), status: 415 };
+    assert!(classify_core_error(&e).is_none());
+}
+
+#[test]
+fn expired_developer_session_is_classified() {
+    let e = Error::DeveloperApi {
+        url: "u".into(),
+        result_code: 1100,
+        http_code: Some(200),
+        message: "Your session has expired".into(),
+    };
+    assert!(matches!(classify_core_error(&e), Some(SignrError::SessionExpired)));
+}
+
+#[test]
 fn positive_codes_match_too() {
     let e = Error::AuthSrpWithMessage(20209, "locked".into());
     assert!(matches!(classify_core_error(&e), Some(SignrError::AccountLocked { .. })));

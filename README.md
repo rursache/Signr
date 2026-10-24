@@ -61,22 +61,31 @@ xcodebuild -scheme Signr -destination 'platform=macOS,arch=arm64' test
 Signing happens locally, but signing in still talks to Apple and needs anisette data (the device fingerprint Apple expects with every login)
 
 - **macOS 26 and earlier**: Signr uses the anisette data your Mac generates itself, the same path Xcode uses
-- **macOS 27**: Apple blocks apps from reading the Mac's own anisette, so the only option is a remote anisette server, and since October 2026 Apple has been rejecting logins from public anisette servers (error -80045) and locking Apple IDs that keep trying (error -20209, "This Apple Account has been locked for security reasons")
+- **macOS 27**: Apple blocks apps from reading the Mac's own anisette, so the only option is a remote anisette server, and since October 2026 Apple rejects anisette that doesn't come from a Mac (error -80045 at sign-in, -80046 after the 2FA code) and has been locking Apple IDs that keep trying (error -20209, "This Apple Account has been locked for security reasons")
 
 Because of that, the remote fallback is **off by default**, and to use it on macOS 27 you turn it on in the sign-in sheet or in *Settings → Anisette*
 
-The *Server* picker in *Settings → Anisette* chooses which anisette-v3 server the fallback uses:
+Signr talks to the server the same way AltServer 1.8.2 does:
 
-- **Default**: ani.sidestore.app, the built-in server
-- **mac-ani.jkcoxson.com**: a server that generates anisette with real Mac ADI
+- It sends Apple the server's own Mac identity and user agent unchanged
+- It keeps one device identity per server and only provisions a new one when the server's identity changes
+- It answers Apple's resync requests
+- It refuses servers that report an Android or Windows identity before anything is sent to Apple
+
+The *Server* picker in *Settings → Anisette* chooses which anisette-v3 server the fallback uses, all presets run Mac ADI:
+
+- **mac-ani.jkcoxson.com**: the default, also in AltStore's server list as ani.jkcoxson.com
+- **ani2.stikstore.app**: the other server in AltStore's list
+- **new.ani.sidestore.io**: SideStore's Mac server
+- **ani.iloader.app**: iloader's Mac server
 - **Custom**: any anisette-v3 server URL you enter
 
-If `libstoreservicescore.so` is present in `~/Library/Application Support/Signr/anisette`, the fallback uses emulated ADI instead of a server
+Some Apple IDs get -23782 ("A Mac with macOS version 10.13 or later is required") because the public Mac servers present an older Mac, and those accounts can't sign in through a remote server, so use a Mac on macOS 26 or earlier or a different Apple ID
 
 If you do turn it on:
 
 - Use a dedicated Apple ID, not your main one
-- Don't keep retrying after a failed login, Signr pauses sign-in after -80045 (until you change the server or restart) and after -20209 (until you confirm the account is unlocked)
+- Don't keep retrying after a failed login, Signr pauses sign-in after -80045, -80046 or -22421 (until you change the server or restart), after -23782 for that Apple ID, and after -20209 (until you confirm the account is unlocked)
 - If your Apple ID gets locked, unlock it at [iforgot.apple.com](https://iforgot.apple.com) before trying again
 
 ## Thanks

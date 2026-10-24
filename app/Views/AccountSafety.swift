@@ -18,9 +18,11 @@ struct AccountSafetyNotice: View {
                 switch block {
                 case .accountLocked:
                     Link("Open iForgot", destination: URL(string: "https://iforgot.apple.com")!)
-                    Button("I've unlocked it") { model.clearAccountLock() }
+                    Button("I've unlocked it") { model.clearAccountLock(for: appleID) }
                 case .anisetteRejected:
                     SettingsLink { Text("Anisette Settings") }
+                case .accountNeedsNewerMac:
+                    EmptyView()
                 }
             }
         } else if model.hasNativeAnisette == false && (inlineConsent || !model.allowRemoteAnisette) {

@@ -48,8 +48,9 @@ final class AppModel {
     /// nil until probed at launch
     var hasNativeAnisette: Bool?
     /// Set after Apple answers with a lock or an anisette rejection, so the user can't keep
-    /// retrying into it for the rest of the session
-    var authBlock: AuthBlock?
+    /// retrying into it for the rest of the session, account blocks are keyed by lowercased Apple ID
+    var accountBlocks: [String: AuthBlock] = [:]
+    var anisetteBlock: AuthBlock?
 
     // Sheets
     var showSignIn = false
@@ -77,12 +78,12 @@ final class AppModel {
         let allowRemote = UserDefaults.standard.bool(forKey: AppModel.allowRemoteAnisetteKey)
         let serverURL = UserDefaults.standard.string(forKey: AppModel.anisetteServerURLKey) ?? ""
         let choice: AnisetteServerChoice
-        if let raw = UserDefaults.standard.string(forKey: AppModel.anisetteServerChoiceKey),
-           let stored = AnisetteServerChoice(rawValue: raw) {
-            choice = stored
+        if let raw = UserDefaults.standard.string(forKey: AppModel.anisetteServerChoiceKey) {
+            // The old default (ani.sidestore.app) serves Android anisette, which Apple rejects
+            choice = AnisetteServerChoice(rawValue: raw) ?? .jkcoxson
         } else {
             // Before the picker existed a non-empty URL meant a custom server
-            choice = serverURL.trimmingCharacters(in: .whitespaces).isEmpty ? .sidestore : .custom
+            choice = serverURL.trimmingCharacters(in: .whitespaces).isEmpty ? .jkcoxson : .custom
         }
         allowRemoteAnisette = allowRemote
         anisetteServerChoice = choice
@@ -124,17 +125,13 @@ final class AppModel {
         anisetteServerChoice != .custom || normalizeServerUrl(url: anisetteServerURL) != nil
     }
 
-    /// Normalized server the remote tier talks to, empty for the built-in default
+    /// Normalized server the remote tier talks to, empty for an invalid custom URL
     private var effectiveAnisetteServer: String {
         AppModel.resolveServer(choice: anisetteServerChoice, customURL: anisetteServerURL)
     }
 
     private static func resolveServer(choice: AnisetteServerChoice, customURL: String) -> String {
-        switch choice {
-        case .sidestore: return ""
-        case .jkcoxson: return normalizeServerUrl(url: AnisetteServerChoice.jkcoxsonURL) ?? ""
-        case .custom: return normalizeServerUrl(url: customURL) ?? ""
-        }
+        normalizeServerUrl(url: choice.url ?? customURL) ?? ""
     }
 
     /// Why Apple-facing work can't start right now because of the anisette setup, if it can't
@@ -159,42 +156,57 @@ final class AppModel {
         UserDefaults.standard.set(anisetteServerURL, forKey: AppModel.anisetteServerURLKey)
         pushAnisetteSettings()
         // Only a different server is a fresh start after a rejection, toggling won't do
-        if case .anisetteRejected(let server) = authBlock, server != effectiveAnisetteServer {
-            authBlock = nil
+        if case .anisetteRejected(let server, _) = anisetteBlock, server != effectiveAnisetteServer {
+            anisetteBlock = nil
         }
     }
 
     /// The block that applies to this Apple ID, if any (an anisette rejection applies to all)
     func activeBlock(for appleID: String?) -> AuthBlock? {
-        switch authBlock {
-        case .accountLocked(let locked):
-            guard let appleID, locked.caseInsensitiveCompare(appleID) == .orderedSame else { return nil }
-            return authBlock
-        case .anisetteRejected, nil:
-            return authBlock
-        }
+        appleID.flatMap { accountBlocks[$0.lowercased()] } ?? anisetteBlock
     }
 
-    func clearAccountLock() {
-        guard let block = authBlock, case .accountLocked = block else { return }
-        authBlock = nil
+    func clearAccountLock(for appleID: String?) {
+        guard let key = appleID?.lowercased(), let block = accountBlocks[key],
+              case .accountLocked = block else { return }
+        accountBlocks[key] = nil
         if errorMessage == block.message { errorMessage = nil }
     }
 
-    /// Readable text for an Apple-facing failure, locks and rejections also set `authBlock`
+    private func blockAccount(_ block: AuthBlock, appleID: String?) -> String {
+        accountBlocks[(appleID ?? "").lowercased()] = block
+        return block.message
+    }
+
+    /// Readable text for an Apple-facing failure, locks and rejections also set a block
     private func describe(_ error: Error, appleID: String?) -> String {
         guard let e = error as? SignrError else { return error.localizedDescription }
         switch e {
         case .AccountLocked:
-            let block = AuthBlock.accountLocked(appleID: appleID ?? "")
-            authBlock = block
-            return block.message
-        case .AnisetteRejected:
-            let block = AuthBlock.anisetteRejected(server: effectiveAnisetteServer)
-            authBlock = block
+            return blockAccount(.accountLocked(appleID: appleID ?? ""), appleID: appleID)
+        case .AccountNeedsNewerMac:
+            return blockAccount(.accountNeedsNewerMac(appleID: appleID ?? ""), appleID: appleID)
+        case .AnisetteRejected(let code, let message):
+            // This Mac's own anisette never went through a server, so there's nothing to switch
+            guard hasNativeAnisette == false else {
+                return "Apple rejected the anisette data (-\(code)): \(message)"
+            }
+            let block = AuthBlock.anisetteRejected(server: effectiveAnisetteServer, code: code)
+            anisetteBlock = block
             return block.message
         case .AnisetteFallbackDisabled:
             return "This Mac can't generate anisette data on its own, so Apple sign-in needs a remote anisette server; you can allow it in Settings at the risk of Apple locking the Apple ID"
+        case .AnisetteServerUnsupported(let clientInfo) where clientInfo.contains("com.apple.dt.Xcode"):
+            return "This anisette server presents an Xcode client identity, which Apple's sign-in servers refuse, so Signr didn't contact Apple; pick another server in Settings"
+        case .AnisetteServerUnsupported:
+            return "This anisette server doesn't generate Mac anisette, which Apple rejects (-80045, -80046), so Signr didn't contact Apple; pick another server in Settings"
+        case .AppleUnavailable(let status):
+            return "Apple's sign-in servers answered HTTP \(status), which usually means they're rate limiting, so wait a while before trying again"
+        case .SessionExpired:
+            if let appleID, account?.appleId.caseInsensitiveCompare(appleID) == .orderedSame {
+                signOut()
+            }
+            return "Apple says this session has expired, so sign in again"
         default:
             return error.localizedDescription
         }
@@ -377,15 +389,23 @@ final class AppModel {
     /// restored session. Best-effort — keeps the stored account if offline/expired.
     func refreshAccountOnLaunch() async {
         guard isSignedIn else { return }
+        let appleID = account?.appleId
         do {
             account = try await engine.refreshTeams()
             teams = engine.listTeams()
             saveAccountCache()
         } catch {
-            // Stay quiet unless Apple said to stop
-            let message = describe(error, appleID: account?.appleId)
-            if authBlock != nil { appendLog(message, .error) }
+            // Stay quiet unless Apple said to stop or ended the session
+            let message = describe(error, appleID: appleID)
+            if activeBlock(for: appleID) != nil || AppModel.isSessionExpired(error) {
+                appendLog(message, .error)
+            }
         }
+    }
+
+    private static func isSessionExpired(_ error: Error) -> Bool {
+        if case .SessionExpired? = error as? SignrError { return true }
+        return false
     }
 
     /// Read an IPA's Info.plist off the main thread.
@@ -677,19 +697,32 @@ final class AppModel {
     }
 }
 
+/// Every preset runs Mac ADI, the only kind Apple still accepts
 enum AnisetteServerChoice: String, CaseIterable, Identifiable {
-    case sidestore
     case jkcoxson
+    case stikstore
+    case sidestoreMac
+    case iloader
     case custom
-
-    static let jkcoxsonURL = "https://mac-ani.jkcoxson.com"
 
     var id: Self { self }
 
+    var url: String? {
+        switch self {
+        case .jkcoxson: return "https://mac-ani.jkcoxson.com"
+        case .stikstore: return "https://ani2.stikstore.app"
+        case .sidestoreMac: return "https://new.ani.sidestore.io"
+        case .iloader: return "https://ani.iloader.app"
+        case .custom: return nil
+        }
+    }
+
     var label: String {
         switch self {
-        case .sidestore: return "Default (ani.sidestore.app)"
-        case .jkcoxson: return "mac-ani.jkcoxson.com (Mac ADI)"
+        case .jkcoxson: return "mac-ani.jkcoxson.com (default)"
+        case .stikstore: return "ani2.stikstore.app (AltStore)"
+        case .sidestoreMac: return "new.ani.sidestore.io (SideStore)"
+        case .iloader: return "ani.iloader.app (iloader)"
         case .custom: return "Custom"
         }
     }
@@ -697,15 +730,24 @@ enum AnisetteServerChoice: String, CaseIterable, Identifiable {
 
 enum AuthBlock: Equatable {
     case accountLocked(appleID: String)
-    /// `server` is the normalized URL that got rejected, empty for the default one
-    case anisetteRejected(server: String)
+    case accountNeedsNewerMac(appleID: String)
+    /// `server` is the normalized URL that got rejected, `code` is Apple's error without the sign
+    case anisetteRejected(server: String, code: Int64)
+
+    private static let paused = "so sign-in is paused to keep repeated attempts from getting the Apple ID locked; pick another server in Settings or restart Signr"
 
     var message: String {
         switch self {
         case .accountLocked:
             return "Apple locked this Apple ID for security reasons (-20209), unlock it at iforgot.apple.com first since retrying while it's locked only makes things worse"
-        case .anisetteRejected:
-            return "Apple rejected the anisette data from the remote server (-80045), so sign-in is paused to keep repeated attempts from getting the Apple ID locked; pick another server in Settings or restart Signr"
+        case .accountNeedsNewerMac:
+            return "Apple only lets this Apple ID sign in from a Mac on macOS 10.13 or later (-23782) and the public anisette servers present an older Mac, so it can't sign in through a remote server; use a Mac on macOS 26 or earlier or a different Apple ID"
+        case .anisetteRejected(_, 80046):
+            return "Apple refused the sign-in token after the password and code were accepted (-80046), which happens when the anisette doesn't come from a Mac, \(Self.paused)"
+        case .anisetteRejected(_, 22421):
+            return "Apple says the anisette data is invalid (-22421), \(Self.paused)"
+        case .anisetteRejected(_, let code):
+            return "Apple rejected the anisette data from the remote server (-\(code)), \(Self.paused)"
         }
     }
 }

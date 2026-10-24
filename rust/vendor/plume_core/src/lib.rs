@@ -6,6 +6,7 @@ pub use apple_codesign::cryptography::{InMemoryPrivateKey, PrivateKey};
 pub use apple_codesign::{AppleCodesignError, SettingsScope, SigningSettings, UnifiedSigner};
 
 pub use utils::{CertificateIdentity, MachO, MachOExt, MobileProvision};
+pub use omnisette;
 
 use thiserror::Error as ThisError;
 #[derive(Debug, ThisError)]
@@ -53,6 +54,16 @@ pub enum Error {
     Anisette(#[from] native_anisette::NativeAnisetteError),
     #[error("This Mac can't generate anisette data itself and the remote anisette fallback is turned off")]
     AnisetteFallbackDisabled,
+    #[error("Anisette data unavailable: {0}")]
+    AnisetteUnavailable(String),
+    #[error("Anisette resync failed: {0}")]
+    AnisetteResync(String),
+    #[error("Invalid value for the {0} header")]
+    InvalidHeader(String),
+    #[error("Apple's sign-in server answered HTTP {status} [URL: {url}]")]
+    GsaHttp { url: String, status: u16 },
+    #[error("Apple kept asking for two-factor authentication")]
+    TooMany2faRounds,
     #[error("Anisette provider error: {0}")]
     AnisetteProvider(#[from] omnisette::AnisetteError),
     #[error("Serde JSON error: {0}")]
@@ -71,6 +82,18 @@ pub enum Error {
     Slice(#[from] std::array::TryFromSliceError),
     #[error("Invalid key length for AES-GCM: {0}")]
     SHA2(#[from] sha2::digest::InvalidLength),
+}
+
+/// GrandSlam and gsa.apple.com/auth requests, a redirect surfaces as an HTTP error like in
+/// AltSign instead of being followed with the anisette and identity headers attached
+pub fn gsa_client() -> Result<reqwest::Client, Error> {
+    const APPLE_ROOT: &[u8] = include_bytes!("./apple_root.der");
+    Ok(reqwest::ClientBuilder::new()
+        .add_root_certificate(reqwest::Certificate::from_der(APPLE_ROOT)?)
+        .redirect(reqwest::redirect::Policy::none())
+        .http1_title_case_headers()
+        .connection_verbose(true)
+        .build()?)
 }
 
 pub fn client() -> Result<reqwest::Client, Error> {

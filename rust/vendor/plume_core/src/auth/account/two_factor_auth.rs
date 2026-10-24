@@ -2,13 +2,22 @@ use std::str::FromStr;
 
 use crate::Error;
 use base64::{Engine, engine::general_purpose};
+use reqwest::Response;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
+use crate::auth::account::check_error;
 use crate::auth::{Account, AuthenticationExtras, LoginState, PhoneNumber, VerifyBody, VerifyCode};
+
+fn http_error(res: &Response) -> Error {
+    Error::GsaHttp {
+        url: res.url().to_string(),
+        status: res.status().as_u16(),
+    }
+}
 
 impl Account {
     pub async fn send_2fa_to_devices(&self) -> Result<LoginState, Error> {
-        let headers = self.build_2fa_headers(false).await;
+        let headers = self.build_2fa_headers(false).await?;
 
         let res = self
             .client
@@ -17,20 +26,15 @@ impl Account {
             .send()
             .await?;
 
-        let status_code = res.status();
-
-        if !status_code.is_success() {
-            return Err(Error::AuthSrpWithMessage(
-                status_code.as_u16() as i64,
-                "Failed to send 2FA to devices".to_string(),
-            ));
+        if !res.status().is_success() {
+            return Err(http_error(&res));
         }
 
         return Ok(LoginState::Needs2FAVerification);
     }
 
     pub async fn send_sms_2fa_to_devices(&self, phone_id: u32) -> Result<LoginState, Error> {
-        let headers = self.build_2fa_headers(true).await;
+        let headers = self.build_2fa_headers(true).await?;
 
         let body = VerifyBody {
             phone_number: PhoneNumber { id: phone_id },
@@ -46,59 +50,65 @@ impl Account {
             .send()
             .await?;
 
-        let status_code = res.status();
-
-        if !status_code.is_success() {
-            return Err(Error::AuthSrpWithMessage(
-                status_code.as_u16() as i64,
-                "Failed to send SMS 2FA to devices".to_string(),
-            ));
+        if !res.status().is_success() {
+            return Err(http_error(&res));
         }
 
         return Ok(LoginState::NeedsSMS2FAVerification(body));
     }
 
     pub async fn get_auth_extras(&self) -> Result<AuthenticationExtras, Error> {
-        let headers = self.build_2fa_headers(true);
+        let headers = self.build_2fa_headers(true).await?;
 
         let req = self
             .client
             .get("https://gsa.apple.com/auth")
-            .headers(headers.await)
+            .headers(headers)
             .header("Accept", "application/json")
             .send()
             .await?;
         let status = req.status().as_u16();
         let mut new_state = req.json::<AuthenticationExtras>().await?;
         if status == 201 {
-            new_state.new_state = Some(LoginState::NeedsSMS2FAVerification(VerifyBody {
-                phone_number: PhoneNumber {
-                    id: new_state.trusted_phone_numbers.first().unwrap().id,
-                },
-                mode: "sms".to_string(),
-                security_code: None,
-            }));
+            if let Some(phone) = new_state.trusted_phone_numbers.first() {
+                new_state.new_state = Some(LoginState::NeedsSMS2FAVerification(VerifyBody {
+                    phone_number: PhoneNumber { id: phone.id },
+                    mode: "sms".to_string(),
+                    security_code: None,
+                }));
+            }
         }
 
         Ok(new_state)
     }
 
     pub async fn verify_2fa(&self, code: String) -> Result<LoginState, Error> {
-        let headers = self.build_2fa_headers(false);
+        self.fresh_anisette().await?;
+        let headers = self.build_2fa_headers(false).await?;
         let res = self
             .client
             .get("https://gsa.apple.com/grandslam/GsService2/validate")
-            .headers(headers.await)
+            .headers(headers)
             .header(
                 HeaderName::from_str("security-code").unwrap(),
-                HeaderValue::from_str(&code).unwrap(),
+                HeaderValue::from_str(&code).map_err(|_| Error::Bad2faCode)?,
             )
             .send()
             .await?;
 
-        let res: plist::Dictionary = plist::from_bytes(res.text().await?.as_bytes())?;
-
-        super::check_error(&res)?;
+        let url = res.url().to_string();
+        let status = res.status();
+        let body = res.bytes().await?;
+        match plist::from_bytes::<plist::Dictionary>(&body) {
+            Ok(dict) => {
+                check_error(&dict)?;
+                if !status.is_success() {
+                    return Err(Error::GsaHttp { url, status: status.as_u16() });
+                }
+            }
+            Err(_) if status.is_success() => return Err(Error::Parse),
+            Err(_) => return Err(Error::GsaHttp { url, status: status.as_u16() }),
+        }
 
         Ok(LoginState::NeedsLogin)
     }
@@ -108,7 +118,7 @@ impl Account {
         code: String,
         mut body: VerifyBody,
     ) -> Result<LoginState, Error> {
-        let headers = self.build_2fa_headers(true).await;
+        let headers = self.build_2fa_headers(true).await?;
         body.security_code = Some(VerifyCode { code });
         let res = self
             .client
@@ -122,6 +132,9 @@ impl Account {
 
         // TODO: 423 http code may occur, in this case we to ask for sending
         // last code sent (unlikely it would even work), or try again later
+        if status_code.is_server_error() || status_code.as_u16() == 429 {
+            return Err(http_error(&res));
+        }
         if !status_code.is_success() {
             return Err(Error::Bad2faCode);
         }
@@ -129,39 +142,23 @@ impl Account {
         Ok(LoginState::NeedsLogin)
     }
 
-    async fn build_2fa_headers(&self, sms: bool) -> HeaderMap {
-        let spd = self.spd.as_ref().unwrap();
-        let dsid = spd.get("adsid").unwrap().as_string().unwrap();
-        let token = spd.get("GsIdmsToken").unwrap().as_string().unwrap();
+    async fn build_2fa_headers(&self, sms: bool) -> Result<HeaderMap, Error> {
+        let spd = self.spd.as_ref().ok_or(Error::Parse)?;
+        let dsid = spd.get("adsid").and_then(|v| v.as_string()).ok_or(Error::Parse)?;
+        let token = spd
+            .get("GsIdmsToken")
+            .and_then(|v| v.as_string())
+            .ok_or(Error::Parse)?;
 
         let identity_token = general_purpose::STANDARD.encode(format!("{}:{}", dsid, token));
 
-        let mut headers = HeaderMap::new();
-        let valid_anisette = self.get_anisette().await;
-        for (k, v) in valid_anisette.generate_headers(false, true, true) {
-            headers.insert(
-                HeaderName::from_bytes(k.as_bytes()).unwrap(),
-                HeaderValue::from_str(&v).unwrap(),
-            );
-        }
-        if !sms {
-            headers.insert("Content-Type", HeaderValue::from_static("text/x-xml-plist"));
-            headers.insert("Accept", HeaderValue::from_static("text/x-xml-plist"));
-        } else {
-            headers.insert("Content-Type", HeaderValue::from_static("application/json"));
-            headers.insert("Accept", HeaderValue::from_static("application/json"));
-        }
-        headers.insert("User-Agent", HeaderValue::from_static("Xcode"));
-        headers.insert("Accept-Language", HeaderValue::from_static("en-us"));
+        let mut headers = self.get_anisette().await.two_factor_headers(sms)?;
         headers.append(
             "X-Apple-Identity-Token",
-            HeaderValue::from_str(&identity_token).unwrap(),
+            HeaderValue::from_str(&identity_token)
+                .map_err(|_| Error::InvalidHeader("X-Apple-Identity-Token".into()))?,
         );
 
-        if let Ok(locale) = valid_anisette.get_header("x-apple-locale") {
-            headers.insert("Loc", HeaderValue::from_str(&locale).unwrap());
-        }
-
-        headers
+        Ok(headers)
     }
 }

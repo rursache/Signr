@@ -1,17 +1,20 @@
+use base64::{Engine, engine::general_purpose};
 use plist::{Dictionary, Value};
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::HeaderValue;
 use sha2::{Digest, Sha256};
 use srp::groups::G2048;
 
 use crate::Error;
 
-use crate::auth::account::{check_error, parse_response};
-use crate::auth::anisette_data::AnisetteData;
+use crate::auth::account::{check_error, gsa_hsc};
+use crate::auth::anisette_data::{AnisetteData, AnisetteSource};
 use crate::auth::{
-    Account, ChallengeRequest, ChallengeRequestBody, GSA_ENDPOINT, InitRequest, InitRequestBody,
-    LoginState, RequestHeader, TrustedPhoneNumber, TwoFactorAction, TwoFactorMethod,
-    TwoFactorRequest,
+    Account, ChallengeRequest, ChallengeRequestBody, InitRequest, InitRequestBody, LoginState,
+    RequestHeader, TrustedPhoneNumber, TwoFactorAction, TwoFactorMethod, TwoFactorRequest,
 };
+
+/// The first login plus two after 2FA, more than that means Apple keeps sending us around
+const MAX_LOGIN_ATTEMPTS: u32 = 3;
 
 #[macro_export]
 macro_rules! plist_get_string {
@@ -65,6 +68,7 @@ impl Account {
         })?;
 
         let mut response = _self.login_email_pass(&username, &password).await?;
+        let mut logins = 1;
         // Cached so the caller can be offered an SMS fallback even when a trusted
         // device handled the push. Fetched lazily the first time 2FA is needed.
         let mut trusted_phone_numbers: Vec<TrustedPhoneNumber> = Vec::new();
@@ -124,7 +128,13 @@ impl Account {
                     }
                 }
                 LoginState::NeedsLogin => {
-                    response = _self.login_email_pass(&username, &password).await?
+                    _self.fresh_anisette().await?;
+                    response = _self.login_email_pass(&username, &password).await?;
+                    logins += 1;
+                    // Stop before pushing or prompting for a code that could never be used
+                    if logins >= MAX_LOGIN_ATTEMPTS && asks_for_two_factor(&response) {
+                        return Err(Error::TooMany2faRounds);
+                    }
                 }
                 LoginState::LoggedIn => return Ok(_self),
                 LoginState::NeedsExtraStep(step) => {
@@ -148,76 +158,61 @@ impl Account {
         let a: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
         let a_pub = srp_client.compute_public_ephemeral(&a);
 
-        let anisette = self.get_anisette().await;
-
-        let mut gsa_headers = HeaderMap::new();
-        gsa_headers.insert(
-            "Content-Type",
-            HeaderValue::from_str("text/x-xml-plist").unwrap(),
-        );
-        gsa_headers.insert("Accept", HeaderValue::from_str("*/*").unwrap());
-        gsa_headers.insert(
-            "User-Agent",
-            HeaderValue::from_str("akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0").unwrap(),
-        );
-        gsa_headers.insert(
-            "X-MMe-Client-Info",
-            HeaderValue::from_str(&anisette.get_header("x-mme-client-info")?).unwrap(),
-        );
+        let mut anisette = self.get_anisette().await;
 
         let header = RequestHeader {
             version: "1.0.1".to_string(),
         };
-        let init_body = InitRequestBody {
-            a_pub: plist::Value::Data(a_pub),
-            cpd: anisette.to_plist(true, false, false),
-            operation: "init".to_string(),
-            ps: vec!["s2k".to_string(), "s2k_fo".to_string()],
-            username: username_for_spd.clone(),
+
+        // Apple answers hsc 434 when it wants the remote anisette resynced, AltSign then
+        // resends init with the same SRP A, once per login
+        let mut resynced = false;
+        let res = loop {
+            let init_packet = InitRequest {
+                header: header.clone(),
+                request: InitRequestBody {
+                    a_pub: plist::Value::Data(a_pub.clone()),
+                    cpd: anisette.cpd(),
+                    operation: "init".to_string(),
+                    ps: vec!["s2k".to_string(), "s2k_fo".to_string()],
+                    username: username_for_spd.clone(),
+                },
+            };
+            let res = self.gsa_post(anisette.gsa_headers()?, &init_packet).await?;
+            if gsa_hsc(&res) != Some(434) || anisette.source != AnisetteSource::RemoteV3 {
+                break res;
+            }
+            if resynced {
+                return Err(Error::AnisetteResync("Apple asked for a second resync".into()));
+            }
+            let sim = resync_data(&res).ok_or_else(|| {
+                Error::AnisetteResync("Apple sent no X-Apple-I-MD-DATA".into())
+            })?;
+            anisette = anisette.resync(&sim).await?;
+            *self.anisette.lock().await = anisette.clone();
+            resynced = true;
         };
-
-        let init_packet = InitRequest {
-            header: header.clone(),
-            request: init_body,
-        };
-
-        let mut buffer = Vec::new();
-        plist::to_writer_xml(&mut buffer, &init_packet)?;
-
-        let res = self
-            .client
-            .post(GSA_ENDPOINT)
-            .headers(gsa_headers.clone())
-            .body(buffer)
-            .send()
-            .await;
-
-        let res = parse_response(res).await?;
         check_error(&res)?;
 
-        let salt = res.get("s").unwrap().as_data().unwrap();
-        let b_pub = res.get("B").unwrap().as_data().unwrap();
-        let iters = res.get("i").unwrap().as_signed_integer().unwrap();
-        let c = res.get("c").unwrap().as_string().unwrap();
+        let salt = res.get("s").and_then(|v| v.as_data()).ok_or(Error::Parse)?;
+        let b_pub = res.get("B").and_then(|v| v.as_data()).ok_or(Error::Parse)?;
+        let iters = res
+            .get("i")
+            .and_then(|v| v.as_signed_integer())
+            .ok_or(Error::Parse)?;
+        let c = res.get("c").and_then(|v| v.as_string()).ok_or(Error::Parse)?;
+        let protocol = res.get("sp").and_then(|v| v.as_string()).unwrap_or("s2k");
 
-        let hashed_password = Sha256::digest(password.as_bytes());
-
-        let mut password_buf = [0u8; 32];
-        pbkdf2::pbkdf2::<hmac::Hmac<Sha256>>(
-            &hashed_password,
-            salt,
-            iters as u32,
-            &mut password_buf,
-        )?;
+        let password_buf = derive_password(password, protocol, salt, iters as u32)?;
 
         let verifier = srp_client
             .process_reply(&a, username_for_spd.as_bytes(), &password_buf, salt, b_pub)
-            .unwrap();
+            .map_err(|_| Error::Parse)?;
 
         let challenge_body = ChallengeRequestBody {
             m: plist::Value::Data(verifier.proof().to_vec()),
             c: c.to_string(),
-            cpd: anisette.to_plist(true, false, false),
+            cpd: anisette.cpd(),
             operation: "complete".to_string(),
             username: username_for_spd.clone(),
         };
@@ -227,28 +222,20 @@ impl Account {
             request: challenge_body,
         };
 
-        let mut buffer = Vec::new();
-        plist::to_writer_xml(&mut buffer, &challenge_packet)?;
-
+        let mut gsa_headers = anisette.gsa_headers()?;
         gsa_headers.insert("Connection", HeaderValue::from_static("close"));
 
-        let res = self
-            .client
-            .post(GSA_ENDPOINT)
-            .headers(gsa_headers)
-            .body(buffer)
-            .send()
-            .await;
-
-        let res = parse_response(res).await?;
+        let res = self.gsa_post(gsa_headers, &challenge_packet).await?;
         check_error(&res)?;
 
-        let m2 = res.get("M2").unwrap().as_data().unwrap();
-        verifier.verify_server(m2).unwrap();
+        let m2 = res.get("M2").and_then(|v| v.as_data()).ok_or(Error::Parse)?;
+        verifier.verify_server(m2).map_err(|_| {
+            Error::AuthSrpWithMessage(0, "Apple's server proof didn't verify".to_string())
+        })?;
 
-        let spd_encrypted = res.get("spd").unwrap().as_data().unwrap();
-        let spd_decrypted = super::decrypt_cbc(&verifier, spd_encrypted);
-        let mut spd: Dictionary = plist::from_bytes(&spd_decrypted).unwrap();
+        let spd_encrypted = res.get("spd").and_then(|v| v.as_data()).ok_or(Error::Parse)?;
+        let spd_decrypted = super::decrypt_cbc(&verifier, spd_encrypted)?;
+        let mut spd: Dictionary = plist::from_bytes(&spd_decrypted)?;
 
         if !spd.contains_key("appleId") {
             spd.insert(
@@ -259,13 +246,22 @@ impl Account {
 
         self.spd = Some(spd);
 
-        let status = res.get("Status").unwrap().as_dictionary().unwrap();
-        if let Some(Value::String(auth_type)) = status.get("au") {
-            return match auth_type.as_str() {
-                "trustedDeviceSecondaryAuth" => Ok(LoginState::NeedsDevice2FA),
-                "secondaryAuth" => Ok(LoginState::NeedsSMS2FA),
-                other => Ok(LoginState::NeedsExtraStep(other.to_string())),
-            };
+        let status = res
+            .get("Status")
+            .and_then(|v| v.as_dictionary())
+            .ok_or(Error::Parse)?;
+        match status.get("au") {
+            Some(Value::String(auth_type)) if !auth_type.is_empty() => {
+                return match auth_type.as_str() {
+                    "trustedDeviceSecondaryAuth" => Ok(LoginState::NeedsDevice2FA),
+                    "secondaryAuth" => Ok(LoginState::NeedsSMS2FA),
+                    other => Ok(LoginState::NeedsExtraStep(other.to_string())),
+                };
+            }
+            // Apple already pushed a code to the trusted devices, asking again would be a
+            // second request AltSign deliberately avoids
+            _ if gsa_hsc(&res) == Some(409) => return Ok(LoginState::Needs2FAVerification),
+            _ => {}
         }
 
         Ok(LoginState::LoggedIn)
@@ -283,6 +279,20 @@ impl Account {
         (plist_get_string!(base, "fn"), plist_get_string!(base, "ln"))
     }
 
+    /// Anisette right before the requests where AltSign refreshes it (GsService2/validate, the
+    /// login after 2FA and apptokens), same identity with a new one-time password
+    pub async fn fresh_anisette(&self) -> Result<AnisetteData, Error> {
+        let mut locked = self.anisette.lock().await;
+        match locked.refresh().await {
+            Ok(fresh) => *locked = fresh,
+            Err(e) if locked.is_valid() => {
+                log::warn!("anisette refresh failed, reusing current data: {e}")
+            }
+            Err(e) => return Err(e),
+        }
+        Ok(locked.clone())
+    }
+
     pub async fn get_anisette(&self) -> AnisetteData {
         let mut locked = self.anisette.lock().await;
         if locked.needs_refresh() {
@@ -298,6 +308,91 @@ impl Account {
     }
 }
 
+fn resync_data(res: &Dictionary) -> Option<String> {
+    let status = res.get("Status").and_then(|v| v.as_dictionary())?;
+    match status.get("X-Apple-I-MD-DATA")? {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Data(d) if !d.is_empty() => Some(general_purpose::STANDARD.encode(d)),
+        _ => None,
+    }
+}
+
+fn asks_for_two_factor(state: &LoginState) -> bool {
+    matches!(
+        state,
+        LoginState::NeedsDevice2FA
+            | LoginState::NeedsSMS2FA
+            | LoginState::Needs2FAVerification
+            | LoginState::NeedsSMS2FAVerification(_)
+    )
+}
+
+/// `s2k_fo` stretches the lowercase hex form of the SHA-256 digest instead of its raw bytes
+fn derive_password(
+    password: &str,
+    protocol: &str,
+    salt: &[u8],
+    iterations: u32,
+) -> Result<[u8; 32], Error> {
+    let digest = Sha256::digest(password.as_bytes());
+    let hex: String;
+    let input: &[u8] = if protocol == "s2k_fo" {
+        hex = digest.iter().map(|b| format!("{b:02x}")).collect();
+        hex.as_bytes()
+    } else {
+        &digest
+    };
+    let mut out = [0u8; 32];
+    pbkdf2::pbkdf2::<hmac::Hmac<Sha256>>(input, salt, iterations, &mut out)?;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn s2k_fo_stretches_the_hex_digest() {
+        let salt = b"saltsaltsaltsalt";
+        let s2k = derive_password("hunter2", "s2k", salt, 1000).unwrap();
+        let fo = derive_password("hunter2", "s2k_fo", salt, 1000).unwrap();
+        assert_ne!(s2k, fo);
+
+        let hex: String = Sha256::digest(b"hunter2").iter().map(|b| format!("{b:02x}")).collect();
+        let mut expected = [0u8; 32];
+        pbkdf2::pbkdf2::<hmac::Hmac<Sha256>>(hex.as_bytes(), salt, 1000, &mut expected).unwrap();
+        assert_eq!(fo, expected);
+    }
+
+    #[test]
+    fn resync_data_accepts_string_or_data() {
+        let mut status = Dictionary::new();
+        status.insert("X-Apple-I-MD-DATA".into(), Value::String("c2lt".into()));
+        let mut res = Dictionary::new();
+        res.insert("Status".into(), Value::Dictionary(status.clone()));
+        assert_eq!(resync_data(&res).as_deref(), Some("c2lt"));
+
+        status.insert("X-Apple-I-MD-DATA".into(), Value::Data(b"sim".to_vec()));
+        res.insert("Status".into(), Value::Dictionary(status));
+        assert_eq!(resync_data(&res).as_deref(), Some("c2lt"));
+
+        assert_eq!(resync_data(&Dictionary::new()), None);
+
+        let mut status = Dictionary::new();
+        status.insert("X-Apple-I-MD-DATA".into(), Value::String(String::new()));
+        res.insert("Status".into(), Value::Dictionary(status));
+        assert_eq!(resync_data(&res), None);
+    }
+
+    #[test]
+    fn two_factor_states_are_recognized() {
+        assert!(asks_for_two_factor(&LoginState::NeedsDevice2FA));
+        assert!(asks_for_two_factor(&LoginState::Needs2FAVerification));
+        assert!(!asks_for_two_factor(&LoginState::LoggedIn));
+        assert!(!asks_for_two_factor(&LoginState::NeedsLogin));
+    }
+}
+
 #[cfg(test)]
 mod srp_protocol_probe {
     use super::*;
@@ -305,9 +400,8 @@ mod srp_protocol_probe {
     /// RS-263 follow-up: find out which key-stretching protocol Apple selects for an account.
     ///
     /// The SRP `init` step needs only a username, never a password, so this is safe to run with
-    /// a real Apple ID. `login_email_pass` always stretches the password the `s2k` way; if Apple
-    /// answers with `sp = s2k_fo` the proof we send is wrong and Apple reports it as error
-    /// -22406 "Enter the correct password", which is indistinguishable from a real typo.
+    /// a real Apple ID, and `login_email_pass` stretches the password the way `sp` asks for so
+    /// both `s2k` and `s2k_fo` accounts are handled
     ///
     ///   SIGNR_PROBE_APPLE_ID=you@example.com \
     ///     cargo test -p plume_core --features tweaks --lib srp_protocol_probe -- --ignored --nocapture
@@ -327,20 +421,7 @@ mod srp_protocol_probe {
         let a: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
         let a_pub = srp_client.compute_public_ephemeral(&a);
 
-        let mut gsa_headers = HeaderMap::new();
-        gsa_headers.insert(
-            "Content-Type",
-            HeaderValue::from_str("text/x-xml-plist").unwrap(),
-        );
-        gsa_headers.insert("Accept", HeaderValue::from_str("*/*").unwrap());
-        gsa_headers.insert(
-            "User-Agent",
-            HeaderValue::from_str("akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0").unwrap(),
-        );
-        gsa_headers.insert(
-            "X-MMe-Client-Info",
-            HeaderValue::from_str(&anisette.get_header("x-mme-client-info").unwrap()).unwrap(),
-        );
+        let gsa_headers = anisette.gsa_headers().unwrap();
 
         let init_packet = InitRequest {
             header: RequestHeader {
@@ -348,7 +429,7 @@ mod srp_protocol_probe {
             },
             request: InitRequestBody {
                 a_pub: plist::Value::Data(a_pub),
-                cpd: anisette.to_plist(true, false, false),
+                cpd: anisette.cpd(),
                 operation: "init".to_string(),
                 ps: vec!["s2k".to_string(), "s2k_fo".to_string()],
                 username: username.clone(),
@@ -360,13 +441,15 @@ mod srp_protocol_probe {
 
         let client = crate::client().unwrap();
         let res = client
-            .post(GSA_ENDPOINT)
+            .post(crate::auth::GSA_ENDPOINT)
             .headers(gsa_headers)
             .body(buffer)
             .send()
             .await;
 
-        let res = parse_response(res).await.expect("no response from GSA");
+        let res = crate::auth::account::parse_response(res)
+            .await
+            .expect("no response from GSA");
         println!("--- GSA init response ---");
         for (k, v) in res.iter() {
             let shown = match k.as_str() {
@@ -383,10 +466,6 @@ mod srp_protocol_probe {
 
         let sp = res.get("sp").and_then(|v| v.as_string()).unwrap_or("<absent>");
         println!("\nselected protocol sp = {sp}");
-        println!(
-            "login_email_pass assumes s2k, so this account is {}",
-            if sp == "s2k_fo" { "MISHANDLED" } else { "handled correctly" }
-        );
     }
 }
 

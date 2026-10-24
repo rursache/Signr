@@ -44,10 +44,18 @@ pub enum SignrError {
     Cancelled,
     #[error("Apple locked this Apple ID: {message}")]
     AccountLocked { message: String },
-    #[error("Apple rejected the anisette data: {message}")]
-    AnisetteRejected { message: String },
+    #[error("Apple rejected the anisette data ({code}): {message}")]
+    AnisetteRejected { code: i64, message: String },
+    #[error("Apple requires a newer Mac for this Apple ID: {message}")]
+    AccountNeedsNewerMac { message: String },
     #[error("This Mac can't generate anisette data and the remote fallback is turned off")]
     AnisetteFallbackDisabled,
+    #[error("The anisette server reports an identity Apple rejects: {client_info}")]
+    AnisetteServerUnsupported { client_info: String },
+    #[error("Apple's sign-in servers answered HTTP {status}")]
+    AppleUnavailable { status: u16 },
+    #[error("Apple ended this session, sign in again")]
+    SessionExpired,
     #[error("{message}")]
     Unexpected { message: String },
 }
@@ -96,13 +104,29 @@ fn auth_err<E: std::fmt::Display>(e: E) -> SignrError {
 /// GrandSlam answers that mean retrying is pointless or, worse, is what gets the account
 /// locked (codes come back negative but are matched on magnitude)
 pub fn classify_core_error(e: &plume_core::Error) -> Option<SignrError> {
+    use plume_core::Error as E;
+    use plume_core::omnisette::AnisetteError as A;
     match e {
-        plume_core::Error::AnisetteFallbackDisabled => Some(SignrError::AnisetteFallbackDisabled),
-        plume_core::Error::AuthSrpWithMessage(code, message) => match code.unsigned_abs() {
+        E::AnisetteFallbackDisabled => Some(SignrError::AnisetteFallbackDisabled),
+        E::AuthSrpWithMessage(code, message) => match code.unsigned_abs() {
             20209 => Some(SignrError::AccountLocked { message: message.clone() }),
-            80045 => Some(SignrError::AnisetteRejected { message: message.clone() }),
+            // -80045 at init, -80046 at apptokens after the password and 2FA code went through,
+            // -22421 invalid anisette
+            code @ (80045 | 80046 | 22421) => Some(SignrError::AnisetteRejected {
+                code: code as i64,
+                message: message.clone(),
+            }),
+            23782 => Some(SignrError::AccountNeedsNewerMac { message: message.clone() }),
             _ => None,
         },
+        E::AnisetteProvider(A::UnsupportedServerIdentity { client_info }) => {
+            Some(SignrError::AnisetteServerUnsupported { client_info: client_info.clone() })
+        }
+        E::GsaHttp { status, .. } if *status == 429 || *status >= 500 => {
+            Some(SignrError::AppleUnavailable { status: *status })
+        }
+        // Developer services after the anisette identity behind the stored token changed
+        E::DeveloperApi { result_code: 1100, .. } => Some(SignrError::SessionExpired),
         _ => None,
     }
 }
@@ -1207,7 +1231,7 @@ impl SignrEngine {
 // Free functions (simple smoke tests)
 // ============================================================================
 
-/// Whether to fall back to emulated or remote anisette when this Mac can't generate its own,
+/// Whether to fall back to a remote anisette server when this Mac can't generate its own,
 /// and which anisette-v3 server to use. Empty URL means the built-in default
 #[uniffi::export]
 pub fn set_anisette_settings(allow_remote: bool, server_url: Option<String>) {
